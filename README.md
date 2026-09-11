@@ -26,6 +26,12 @@ The contract this implements is
 `docs/mission-format.md` and the runner's API is `docs/runner-api.md` in the
 same repository.
 
+## Download
+
+Grab the latest `Mission.Builder_*_x64-setup.exe` (or the `.msi`) from
+[Releases](https://github.com/phuwanat-vg/mission-builder/releases). Installed copies
+check for new versions themselves, so this is a one-time download.
+
 ## The window
 
 ```
