@@ -44,7 +44,7 @@ export class MapsPanel {
 
     if (names.length === 0) {
       body.append(
-        h("p", { class: "prose", text: "The robot has no maps yet. Register one by giving it a name and the path of its map.yaml on the robot, then draw the points and lanes on it." }),
+        h("p", { class: "prose", text: "The project has no maps yet. Register one by giving it a name and the path of its map.yaml on the robot, then draw the points and lanes on it." }),
       );
     }
 
@@ -114,7 +114,7 @@ export class MapsPanel {
         this.#host.toast(`There is already a map called ${newName.trim()}.`);
         return;
       }
-      this.#host.toast(`${newName.trim()} is registered. Deploy saves it to the robot.`, "info");
+      this.#host.toast(`${newName.trim()} is part of the project now. Deploy sends it to the robot.`, "info");
       this.#host.refresh();
     });
     body.append(h("div", { class: "row" }, add));

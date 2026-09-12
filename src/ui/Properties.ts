@@ -1,10 +1,12 @@
 /**
  * The right column: whatever is selected, edited in place.
  *
- * A tree node, a point or a lane all land here. The per-step forms are
- * generated from the ported block registry (`ActionForm.ts`); the lane
- * configuration below is written by hand because direction, blocked, speed cap
- * and cost are the four things an operator actually reasons about.
+ * A tree node, a point, several points or a lane all land here. The per-step
+ * forms are generated from the ported block registry (`ActionForm.ts`), except
+ * the request form, which is written by hand (`RequestForm.ts`). The point and
+ * lane configuration is written by hand because coordinates, direction,
+ * blocked, speed cap and cost are the things an operator actually reasons
+ * about.
  */
 
 import { h, row } from "./dom";
@@ -12,14 +14,18 @@ import { icon } from "./icons";
 import { actionForm, selectInput, textInput } from "./ActionForm";
 import type { FormContext } from "./ActionForm";
 import { paramControl } from "./ActionForm";
+import { requestForm } from "./RequestForm";
 import type { RouteStore } from "../mission/RouteStore";
 import type { Edge, Finding, Mission, Site, Step, Trigger } from "../mission/types";
-import { POLICIES, SITE_KINDS, INPUT_TYPES } from "../mission/types";
-import { blockDefOrUnknown, triggerDef, triggerSummary } from "../mission/blocks";
-import { getStepAt } from "../mission/ids";
+import { MISSION_NAME_RE, POLICIES, SITE_KINDS, INPUT_TYPES } from "../mission/types";
+import { blockDefOrUnknown, stepTitle, triggerDef, triggerSummary } from "../mission/blocks";
+import { getStepAt, walkSteps } from "../mission/ids";
 import { buildTree, findNode } from "../mission/tree";
 import type { TreeNode } from "../mission/tree";
 import { pathToString } from "../mission/validate";
+import { arrivalsAt, planForStep } from "../mission/stops";
+import type { Arrival } from "../mission/stops";
+import { hasExpression } from "../mission/expressions";
 
 export interface PropertiesHost {
   store: RouteStore;
@@ -31,6 +37,12 @@ export interface PropertiesHost {
   /** Ask the map to move the camera onto a point. */
   focusPoint(name: string): void;
   toast(message: string, kind?: "error" | "info"): void;
+  /** Open a mission of the project (if it is not open) and select one of its steps. */
+  revealStep(mission: string, stepId: string): void;
+  /** Pick a step and insert it after the actions that follow a Follow route. */
+  addActionAt(arrival: Arrival, anchor: HTMLElement): void;
+  /** Append a Follow route to a point to the open mission's tasks. */
+  addFollowRouteTo(point: string): void;
 }
 
 export class Properties {
@@ -50,11 +62,13 @@ export class Properties {
     const store = this.#host.store;
     const sel = store.selection;
     if (sel.kind === "point") return this.#renderPoint(sel.name);
+    if (sel.kind === "points") return this.#renderPoints(sel.names);
     if (sel.kind === "lane") return this.#renderLane(sel.index);
     if (sel.kind === "node") return this.#renderNode(sel.id);
     this.#title.textContent = "Nothing selected";
     this.#body.replaceChildren(
       h("p", { class: "prose", text: "Pick something in the tree on the left, or a point or a lane on the map, and it is edited here." }),
+      h("p", { class: "prose muted", text: "Ctrl-click several points on the map to connect them in order." }),
     );
   }
 
@@ -92,7 +106,15 @@ export class Properties {
     const body = h("div");
     body.append(
       row("Name", textInput(mission.name, "pickup_job", (v) => {
-        store.setMissionField("name", v.trim(), "Rename mission");
+        const next = v.trim();
+        if (next === mission.name) return;
+        if (store.missions.some((m) => m !== mission && m.name === next)) {
+          this.#host.toast(`The project already has a mission called ${next}.`);
+          this.#host.refresh();
+          return;
+        }
+        if (!MISSION_NAME_RE.test(next)) this.#host.toast("A mission name is lowercase letters, digits, underscore and hyphen, starting with a letter.");
+        store.setMissionField("name", next, "Rename mission");
         this.#host.refresh();
       })),
       row("Title", textInput(mission.title ?? "", "Pickup job", (v) => {
@@ -267,10 +289,16 @@ export class Properties {
     body.append(h("div", { class: "props-type" }, icon(def.icon), h("span", { text: def.label }), h("span", { class: "props-typename", text: step.type })));
     body.append(h("p", { class: "prose", text: def.help }));
 
-    body.append(actionForm(step, ctx, (key, value) => {
+    const onChange = (key: string, value: unknown): void => {
       store.setStepParam(step, key, value);
       this.#host.refresh();
-    }));
+    };
+    if (step.type === "ros.request") {
+      body.append(requestForm(step, { ...ctx, missionName: mission.name, stationDefault: lastRouteSiteBefore(mission, step) }, onChange));
+    } else {
+      body.append(actionForm(step, ctx, onChange));
+    }
+    if (step.type === "nav.follow_route") this.#appendPlannedRoute(body, mission, step);
 
     body.append(h("div", { class: "sub-title", text: "When it goes wrong" }));
     const onFail = step.on_fail ?? {};
@@ -303,13 +331,16 @@ export class Properties {
     body.append(h("div", { class: "row" }, addFail));
 
     body.append(h("div", { class: "sub-title", text: "This step" }));
-    const timeout = h("input", { type: "number", min: 0, value: step.timeout_s === undefined ? "" : String(step.timeout_s) });
-    timeout.addEventListener("change", () => {
-      const n = Number(timeout.value);
-      store.setStepParam(step, "timeout_s", timeout.value === "" || !Number.isFinite(n) ? undefined : n, "Change the timeout");
-      this.#host.refresh();
-    });
-    body.append(row("Give up after (s)", timeout));
+    // The request form has its own "Give up after", next to what happens then.
+    if (step.type !== "ros.request") {
+      const timeout = h("input", { type: "number", min: 0, value: step.timeout_s === undefined ? "" : String(step.timeout_s) });
+      timeout.addEventListener("change", () => {
+        const n = Number(timeout.value);
+        store.setStepParam(step, "timeout_s", timeout.value === "" || !Number.isFinite(n) ? undefined : n, "Change the timeout");
+        this.#host.refresh();
+      });
+      body.append(row("Give up after (s)", timeout));
+    }
     body.append(row("Store the result in", textInput(typeof step.out === "string" ? step.out : "", "(no variable)", (v) => {
       store.setStepParam(step, "out", v.trim() === "" ? undefined : v.trim(), "Change where the result goes");
       this.#host.refresh();
@@ -324,6 +355,42 @@ export class Properties {
     body.append(h("div", { class: "row" }, h("span", { class: "stats", text: `Step id ${String(step.id ?? "(none)")}` })));
     this.#appendFindings(body, node.path, undefined, typeof step.id === "string" ? step.id : undefined);
     this.#body.replaceChildren(body);
+  }
+
+  /** What a Follow route will drive, planned with the runner's rules. */
+  #appendPlannedRoute(body: HTMLElement, mission: Mission, step: Step): void {
+    const store = this.#host.store;
+    body.append(h("div", { class: "sub-title", text: "Planned route" }));
+    const to = typeof step.to === "string" ? step.to : "";
+    if (to === "") {
+      body.append(h("p", { class: "prose", text: "Pick where it drives to, and the route along the lanes is shown here and on the map." }));
+      return;
+    }
+    const leg = typeof step.id === "string" ? planForStep(step.id, store.stops, store.points, store.lanes, mission) : null;
+    if (!leg) {
+      body.append(h("p", { class: "prose", text: hasExpression(to) ? `The destination ${to} is only known when the mission runs, so its route is planned on the robot.` : "The route cannot be planned here." }));
+      return;
+    }
+    if (leg.route.length === 0) {
+      body.append(h("div", { class: "finding error" }, h("div", { text: leg.problem })));
+      return;
+    }
+    const chain = leg.start === null ? ["(nearest point to the robot)", ...leg.route] : leg.route;
+    body.append(h("div", { class: `route-chain${leg.problem ? " bad" : ""}`, text: chain.join(" → ") }));
+    if (leg.route.length > 1) body.append(h("div", { class: "stats", text: `${leg.route.length - 1} ${leg.route.length === 2 ? "lane" : "lanes"}, ${leg.lengthM.toFixed(1)} m` }));
+    if (leg.problem) {
+      body.append(
+        h("div", { class: `finding ${leg.direct ? "warning" : "error"}` }, h("div", { text: leg.direct ? `${leg.problem} The robot drives straight there instead, because 'When there is no route' is direct.` : leg.problem })),
+      );
+    }
+    const from = typeof step.from === "string" && step.from !== "" ? step.from : null;
+    const startSentence =
+      leg.start === null
+        ? "It starts from the point nearest the robot, so the first lane is chosen on the robot when it runs."
+        : from !== null
+          ? `It starts from ${from}.`
+          : `It starts from ${leg.start}, where the Follow route before it ends.`;
+    body.append(h("p", { class: "prose muted", text: startSentence }));
   }
 
   #renderContainer(node: TreeNode): void {
@@ -355,34 +422,29 @@ export class Properties {
       store.setPointKind(name, v as (typeof SITE_KINDS)[number]);
       this.#host.refresh();
     })));
-    const x = numberInput(site.x, (v) => {
-      store.edit("Move point", () => store.movePoint(name, v, site.y));
-      this.#host.refresh();
-    });
-    const y = numberInput(site.y, (v) => {
-      store.edit("Move point", () => store.movePoint(name, site.x, v));
-      this.#host.refresh();
-    });
-    body.append(row("X (m)", x), row("Y (m)", y));
-    const yaw = h("input", { type: "number", step: 1, value: site.yaw_deg === undefined ? "" : String(site.yaw_deg), placeholder: "(no heading)" });
-    yaw.addEventListener("change", () => {
-      const n = Number(yaw.value);
-      store.edit("Set heading", () => store.setPointYaw(name, yaw.value === "" || !Number.isFinite(n) ? null : n));
-      this.#host.refresh();
-    });
-    body.append(row("Heading (deg)", yaw));
+    body.append(
+      row("X (m)", this.#liveNumber(site.x, 0.1, "", false, "Move point", (n) => store.movePoint(name, n ?? site.x, site.y))),
+      row("Y (m)", this.#liveNumber(site.y, 0.1, "", false, "Move point", (n) => store.movePoint(name, site.x, n ?? site.y))),
+      row("Heading (deg)", this.#liveNumber(site.yaw_deg, 5, "(no heading)", true, "Set heading", (n) => store.setPointYaw(name, n))),
+    );
+    body.append(h("p", { class: "prose muted", text: "Map frame, metres. Heading 0 is along +x, counter-clockwise positive. Typing moves the point; Ctrl+Z puts it back." }));
 
     const lanes = store.lanes.map((lane, index) => ({ lane, index })).filter(({ lane }) => lane.from === name || lane.to === name);
     body.append(h("div", { class: "sub-title", text: "Lanes here" }));
     if (lanes.length === 0) body.append(h("p", { class: "prose", text: "No lane reaches this point yet, so nothing can drive to it along the route graph." }));
     for (const { lane, index } of lanes) {
-      const btn = h("button", { class: "list-row" }, icon("route"), h("span", { text: laneName(lane) }));
+      const other = lane.from === name ? lane.to : lane.from;
+      const glyph = lane.bidirectional === false ? (lane.from === name ? "→" : "←") : "⇄";
+      const sentence = lane.bidirectional === false ? (lane.from === name ? `One-way from ${name} to ${other}` : `One-way from ${other} to ${name}`) : `Two-way between ${name} and ${other}`;
+      const btn = h("button", { class: "list-row", title: `${sentence}${lane.blocked === true ? ", blocked" : ""}.` }, h("span", { class: "lane-glyph", text: glyph }), h("span", { text: other }), ...(lane.blocked === true ? [h("span", { class: "pill", text: "blocked" })] : []));
       btn.addEventListener("click", () => {
         store.select({ kind: "lane", index });
         this.#host.refresh();
       });
       body.append(btn);
     }
+
+    this.#appendArrivals(body, name);
 
     const focus = h("button", {}, icon("locate"), "Show it on the map");
     focus.addEventListener("click", () => this.#host.focusPoint(name));
@@ -394,6 +456,74 @@ export class Properties {
       this.#host.refresh();
     });
     body.append(h("div", { class: "row buttons" }, focus, del));
+    this.#body.replaceChildren(body);
+  }
+
+  /** The tasks that happen when a mission arrives at this point, per mission. */
+  #appendArrivals(body: HTMLElement, name: string): void {
+    const store = this.#host.store;
+    const arrivals = arrivalsAt(store.missions, name);
+    body.append(h("div", { class: "sub-title", text: "Actions here" }));
+    if (arrivals.length === 0) {
+      const open = store.mission;
+      body.append(h("p", { class: "prose", text: open ? `No mission drives here yet. Actions at a point are the tasks after a Follow route to it.` : "No mission drives here yet. Create a mission first, then add a Follow route to this point." }));
+      if (open) {
+        const add = h("button", {}, icon("route"), `Add a Follow route to ${name} in ${open.name}`);
+        add.addEventListener("click", () => this.#host.addFollowRouteTo(name));
+        body.append(h("div", { class: "row" }, add));
+      }
+      return;
+    }
+    const byMission = new Map<string, Arrival[]>();
+    for (const a of arrivals) {
+      const list = byMission.get(a.mission);
+      if (list) list.push(a);
+      else byMission.set(a.mission, [a]);
+    }
+    for (const [missionName, list] of byMission) {
+      const count = list.reduce((n, a) => n + a.actions.length, 0);
+      const card = h("div", { class: "arrival-card" });
+      card.append(h("div", { class: "arrival-head" }, icon("file"), h("span", { class: "arrival-mission", text: missionName }), h("span", { class: "stats", text: `${count} ${count === 1 ? "action" : "actions"}` })));
+      list.forEach((arrival, i) => {
+        if (list.length > 1) card.append(h("div", { class: "arrival-when", text: `Arrival ${i + 1}` }));
+        const drive = h("button", { class: "list-row", title: "Show this Follow route in the tree" }, icon("route"), h("span", { text: stepTitle(arrival.step) }));
+        drive.addEventListener("click", () => this.#host.revealStep(missionName, String(arrival.step.id ?? "")));
+        card.append(drive);
+        for (const action of arrival.actions) {
+          const def = blockDefOrUnknown(action.type);
+          const btn = h("button", { class: "list-row indent" }, icon(def.icon), h("span", { text: stepTitle(action) }));
+          btn.addEventListener("click", () => this.#host.revealStep(missionName, String(action.id ?? "")));
+          card.append(btn);
+        }
+        const add = h("button", { class: "link-btn" }, icon("plus"), "Add action here");
+        add.addEventListener("click", () => this.#host.addActionAt(arrival, add));
+        card.append(add);
+      });
+      body.append(card);
+    }
+  }
+
+  /** Several points picked with Ctrl-click. */
+  #renderPoints(names: string[]): void {
+    const store = this.#host.store;
+    this.#title.textContent = `${names.length} points`;
+    const body = h("div");
+    body.append(h("div", { class: "props-type" }, icon("waypoints"), h("span", { text: "Points" }), h("span", { class: "props-typename", text: store.mapName })));
+    body.append(h("p", { class: "prose", text: `Picked in this order: ${names.join(", ")}.` }));
+    const connect = h("button", { class: "primary" }, icon("route"), "Connect in order");
+    connect.title = `Two-way lanes ${names.join(" ⇄ ")}`;
+    connect.addEventListener("click", () => {
+      const added = store.connectInOrder(names);
+      this.#host.toast(added === 0 ? "Those points are already joined in that order." : `Added ${added} two-way ${added === 1 ? "lane" : "lanes"}: ${names.join(" ⇄ ")}.`, "info");
+      this.#host.refresh();
+    });
+    const clear = h("button", {}, icon("close"), "Clear the selection");
+    clear.addEventListener("click", () => {
+      store.select({ kind: "none" });
+      this.#host.refresh();
+    });
+    body.append(h("div", { class: "row buttons" }, connect, clear));
+    body.append(h("p", { class: "prose muted", text: "Pairs that a lane already joins are skipped. Make a lane one-way afterwards by selecting it." }));
     this.#body.replaceChildren(body);
   }
 
@@ -410,34 +540,39 @@ export class Properties {
     const body = h("div");
     body.append(h("div", { class: "props-type" }, icon("route"), h("span", { text: "Lane" }), h("span", { class: "props-typename", text: store.mapName })));
 
+    const a = lane.from;
+    const b = lane.to;
     const oneWay = lane.bidirectional === false;
-    const direction = oneWay ? `one-${lane.from}` : "both";
-    const options = ["both", `one-${lane.from}`, `one-${lane.to}`];
-    const labels = new Map<string, string>([
-      ["both", "Both ways"],
-      [`one-${lane.from}`, `One way, ${lane.from} to ${lane.to}`],
-      [`one-${lane.to}`, `One way, ${lane.to} to ${lane.from}`],
-    ]);
-    const sel = h("select");
-    for (const o of options) sel.appendChild(h("option", { value: o, text: labels.get(o) ?? o }));
-    sel.value = direction;
-    sel.addEventListener("change", () => {
-      const v = sel.value;
-      if (v === "both") store.updateLane(index, { bidirectional: undefined }, "Make the lane two-way");
-      else if (v === `one-${lane.from}`) store.updateLane(index, { bidirectional: false }, "Make the lane one-way");
-      else {
+    const choices: { id: string; label: string; title: string; active: boolean; apply: () => void }[] = [
+      { id: "both", label: `${a} ⇄ ${b}`, title: "Two-way", active: !oneWay, apply: () => store.updateLane(index, { bidirectional: undefined }, "Make the lane two-way") },
+      { id: "ab", label: `${a} → ${b}`, title: `One-way, ${a} to ${b}`, active: oneWay, apply: () => store.updateLane(index, { bidirectional: false }, "Make the lane one-way") },
+      {
+        id: "ba",
+        label: `${b} → ${a}`,
+        title: `One-way, ${b} to ${a}`,
+        active: false,
         // "one way the other way" is the same lane with its ends swapped.
-        store.edit("Reverse the lane", () => {
-          const from = lane.from;
-          lane.from = lane.to;
-          lane.to = from;
-          lane.bidirectional = false;
-        });
-      }
-      this.#host.refresh();
-    });
-    body.append(row("Direction", sel));
-    body.append(h("p", { class: "prose muted", text: oneWay ? `The robot may only drive from ${lane.from} to ${lane.to} on this lane.` : "The robot may drive this lane in either direction." }));
+        apply: () =>
+          store.edit("Make the lane one-way the other way", () => {
+            lane.from = b;
+            lane.to = a;
+            lane.bidirectional = false;
+          }),
+      },
+    ];
+    const dir = h("div", { class: "direction-choices" });
+    for (const c of choices) {
+      const btn = h("button", { class: `direction${c.active ? " active" : ""}`, title: c.title }, h("span", { text: c.label }));
+      btn.dataset.direction = c.id;
+      btn.addEventListener("click", () => {
+        if (c.active) return;
+        c.apply();
+        this.#host.refresh();
+      });
+      dir.append(btn);
+    }
+    body.append(h("div", { class: "sub-title", text: "Direction" }), dir);
+    body.append(h("p", { class: "prose muted", text: oneWay ? `The robot may only drive from ${a} to ${b} on this lane.` : "The robot may drive this lane in either direction." }));
 
     const blocked = h("input", { type: "checkbox" });
     blocked.checked = lane.blocked === true;
@@ -485,6 +620,32 @@ export class Properties {
     this.#body.replaceChildren(body);
   }
 
+  /**
+   * A number field that edits live: every keystroke moves the point on the map
+   * inside one pending edit, and leaving the field (or Enter) commits it, so
+   * a typed coordinate is one undo step, the same as a drag.
+   */
+  #liveNumber(value: number | undefined, step: number, placeholder: string, allowEmpty: boolean, label: string, apply: (n: number | null) => void): HTMLInputElement {
+    const store = this.#host.store;
+    const inp = h("input", { type: "number", step, value: value === undefined ? "" : String(value), placeholder });
+    inp.addEventListener("input", () => {
+      const text = inp.value.trim();
+      const n = Number(text);
+      if (text === "" ? !allowEmpty : !Number.isFinite(n)) return;
+      if (!store.editing) store.beginEdit(label);
+      apply(text === "" ? null : n);
+      store.version++;
+    });
+    const finish = (): void => {
+      if (!store.editing) return;
+      store.commit();
+      this.#host.refresh();
+    };
+    inp.addEventListener("change", finish);
+    inp.addEventListener("blur", finish);
+    return inp;
+  }
+
   // ---- findings -----------------------------------------------------------
 
   #appendFindings(body: HTMLElement, prefix: readonly (string | number)[], mission?: Mission, stepId?: string): void {
@@ -507,17 +668,18 @@ export class Properties {
 
 // ---- helpers ----------------------------------------------------------------
 
-function numberInput(value: number, onChange: (v: number) => void): HTMLInputElement {
-  const inp = h("input", { type: "number", step: 0.01, value: String(value) });
-  inp.addEventListener("change", () => {
-    const n = Number(inp.value);
-    if (Number.isFinite(n)) onChange(n);
-  });
-  return inp;
+/** The destination of the last Follow route before `step`, in document order. */
+export function lastRouteSiteBefore(mission: Mission, step: Step): string | null {
+  let last: string | null = null;
+  for (const visit of walkSteps(mission)) {
+    if (visit.step === step) break;
+    if (visit.step.type === "nav.follow_route" && typeof visit.step.to === "string" && visit.step.to !== "") last = visit.step.to;
+  }
+  return last;
 }
 
 export function laneName(lane: Edge): string {
-  return `${lane.from} ${lane.bidirectional === false ? "→" : "↔"} ${lane.to}`;
+  return `${lane.from} ${lane.bidirectional === false ? "→" : "⇄"} ${lane.to}`;
 }
 
 function containerSentence(node: TreeNode): string {

@@ -6,7 +6,31 @@
   "permissions": [
     "core:default",
     "core:app:allow-version",
+    "core:window:allow-set-title",
+    "core:window:allow-destroy",
     "updater:default",
-    "process:allow-restart"
+    "process:allow-restart",
+    "dialog:allow-open",
+    "dialog:allow-save",
+    {
+      "identifier": "fs:allow-read-text-file",
+      "allow": [{ "path": "**/*.mproj" }, { "path": "**/*.mproj.autosave" }]
+    },
+    {
+      "identifier": "fs:allow-write-text-file",
+      "allow": [{ "path": "**/*.mproj" }, { "path": "**/*.mproj.autosave" }]
+    },
+    {
+      "identifier": "fs:allow-exists",
+      "allow": [{ "path": "**/*.mproj" }, { "path": "**/*.mproj.autosave" }]
+    },
+    {
+      "identifier": "fs:allow-stat",
+      "allow": [{ "path": "**/*.mproj" }, { "path": "**/*.mproj.autosave" }]
+    },
+    {
+      "identifier": "fs:allow-remove",
+      "allow": [{ "path": "**/*.mproj.autosave" }]
+    }
   ]
 }

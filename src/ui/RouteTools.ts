@@ -77,7 +77,7 @@ export class RouteTools {
   static hintFor(tool: string): string {
     switch (tool) {
       case TOOL_SELECT:
-        return "Click a point or a lane to see it. Drag a point to move it, drag its arrow to turn it, Del deletes it.";
+        return "Click a point or a lane to see it. Drag a point to move it, drag its arrow to turn it. Ctrl-click several points to connect them in order.";
       case TOOL_POINT:
         return "Click the floor to add a point. Drag before you let go to say which way the robot faces there.";
       case TOOL_LINK:
@@ -108,6 +108,13 @@ export class RouteTools {
         if (hit?.kind === "point") {
           if (this.#host.onPointPicked?.(hit.name) === true) {
             this.#end();
+            return;
+          }
+          // Ctrl-click picks several points, in order, for "Connect in order".
+          if (ev.ctrlKey) {
+            this.#host.store.togglePointInSelection(hit.name);
+            this.#end();
+            this.#host.refresh();
             return;
           }
           this.#mode = "move";
@@ -143,7 +150,7 @@ export class RouteTools {
       },
       onPointerUp: () => {
         if (this.#mode === "move" || this.#mode === "yaw") {
-          if (this.#moved) this.#host.store.commit({ sites: true });
+          if (this.#moved) this.#host.store.commit();
           else this.#host.store.rollback();
         }
         this.#end();

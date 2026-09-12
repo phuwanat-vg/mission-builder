@@ -20,6 +20,9 @@ export interface FormContext {
   mapNames: string[];
   connectorNames: string[];
   missionNames: string[];
+  /** The project's request and answer topics (`ros.request` placeholders). */
+  requestTopic: string;
+  answerTopic: string;
 }
 
 export interface ActionChoice {
@@ -176,7 +179,9 @@ export function paramControl(def: ParamDef, value: unknown, ctx: FormContext, on
     case "select":
       return selectInput(def.options ?? [], typeof value === "string" ? value : String(def.default ?? ""), false, (v) => onChange(v));
     case "site":
-      return selectInput(ctx.siteNames, typeof value === "string" ? value : "", true, (v) => onChange(v));
+      return selectInput(ctx.siteNames, typeof value === "string" ? value : "", true, (v) => onChange(v === "" && !def.required ? undefined : v));
+    case "sites":
+      return sitesListControl(Array.isArray(value) ? value.map(String) : [], ctx, onChange);
     case "map":
       return selectInput(ctx.mapNames, typeof value === "string" ? value : "", true, (v) => onChange(v));
     case "connector":
@@ -270,6 +275,44 @@ function poseControl(value: unknown, ctx: FormContext, onChange: (v: unknown) =>
     else onChange(sel.value);
   });
   wrap.append(sel, raw);
+  return wrap;
+}
+
+/**
+ * An ordered list of points (a Follow route's `through`): one row per point
+ * with up, down and remove, and a dropdown that appends one. An empty list is
+ * removed from the step rather than written as `[]`.
+ */
+function sitesListControl(list: string[], ctx: FormContext, onChange: (v: unknown) => void): HTMLElement {
+  const wrap = h("div", { class: "list-control" });
+  const emit = (next: string[]): void => onChange(next.length === 0 ? undefined : next);
+  list.forEach((name, i) => {
+    const up = h("button", { class: "icon-only", title: `Visit ${name} earlier` }, icon("arrowUp"));
+    up.disabled = i === 0;
+    up.addEventListener("click", () => {
+      const next = list.slice();
+      [next[i - 1], next[i]] = [next[i]!, next[i - 1]!];
+      emit(next);
+    });
+    const down = h("button", { class: "icon-only", title: `Visit ${name} later` }, icon("arrowDown"));
+    down.disabled = i === list.length - 1;
+    down.addEventListener("click", () => {
+      const next = list.slice();
+      [next[i + 1], next[i]] = [next[i]!, next[i + 1]!];
+      emit(next);
+    });
+    const del = h("button", { class: "icon-only danger", title: `Do not pass ${name}` }, icon("close"));
+    del.addEventListener("click", () => emit(list.filter((_, j) => j !== i)));
+    const known = ctx.siteNames.includes(name);
+    wrap.append(h("div", { class: `list-item${known ? "" : " bad"}`, title: known ? "" : `${name} is not a point on this map.` }, h("span", { class: "list-no", text: String(i + 1) }), h("span", { class: "list-name", text: name }), up, down, del));
+  });
+  const add = h("select");
+  add.appendChild(h("option", { value: "", text: list.length === 0 ? "Pass through a point…" : "Add another point…" }));
+  for (const name of ctx.siteNames) add.appendChild(h("option", { value: name, text: name }));
+  add.addEventListener("change", () => {
+    if (add.value !== "") emit([...list, add.value]);
+  });
+  wrap.append(add);
   return wrap;
 }
 

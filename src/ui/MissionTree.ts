@@ -18,7 +18,7 @@ import { openMenu, openStepPicker, openTriggerPicker, stepForChoice, triggerForT
 import type { MenuItem } from "./StepPicker";
 import type { RouteStore } from "../mission/RouteStore";
 import type { MissionSummary } from "../mission/MissionApi";
-import type { Finding, Path } from "../mission/types";
+import type { Finding, Path, Step } from "../mission/types";
 import { DEFAULT_EXPANDED, badgeSentence, badgesForTree, buildTree, flattenVisible, pathToNode } from "../mission/tree";
 import type { NodeBadges, TreeNode } from "../mission/tree";
 import { genId } from "../mission/ids";
@@ -33,11 +33,13 @@ export interface StepRunState {
 
 export interface TreeHost {
   store: RouteStore;
-  /** The missions the robot knows, for the top level. */
+  /** The project's missions, for the top level. */
   missionList(): readonly MissionSummary[];
   openMission(name: string): void;
   createMission(): void;
   deleteMission(name: string): void;
+  /** Fill in what a new step takes from the project (the request topics). */
+  prepareStep(step: Step, listPath: Path): void;
   exportPython(): void;
   exportBt(): void;
   /** Validation findings for the open mission. */
@@ -129,6 +131,11 @@ export class MissionTree {
     const selection = store.selection;
     const selectedId = selection.kind === "node" ? selection.id : "";
     this.#rowsEl.replaceChildren(...this.#rows.map((r) => this.#row(r.node, r.depth, selectedId, runState)));
+    if (root.children.length === 0) {
+      const create = h("button", { class: "step-btn" }, icon("plus"), h("span", { text: "Create a mission" }));
+      create.addEventListener("click", () => this.#host.createMission());
+      this.#rowsEl.append(h("div", { class: "tree-empty" }, h("p", { class: "prose", text: "This project has no missions yet. A mission is the list of tasks the robot performs." }), create));
+    }
   }
 
   // ---- rows ---------------------------------------------------------------
@@ -271,6 +278,7 @@ export class MissionTree {
     openStepPicker(anchor, `Add a step to ${node.label}`, (choice) => {
       const store = this.#host.store;
       const step = stepForChoice(choice, store.freshStepId());
+      this.#host.prepareStep(step, listPath);
       const added = store.insertStep(listPath, -1, step, `Add ${choice.label.toLowerCase()}`);
       this.render();
       if (added) this.reveal(`step:${String(step.id)}`);
@@ -322,7 +330,7 @@ export class MissionTree {
         items.push({ label: "Export as behavior-tree XML", icon: "fileText" as IconName, run: () => this.#host.exportBt() });
       }
       items.push({ label: "-", run: () => undefined });
-      items.push({ label: "Delete from the robot", icon: "trash" as IconName, danger: true, disabled: name === "", run: () => this.#host.deleteMission(name) });
+      items.push({ label: "Delete from the project", icon: "trash" as IconName, danger: true, disabled: name === "", run: () => this.#host.deleteMission(name) });
     }
     if (items.length === 0) return;
     openMenu(x, y, items);

@@ -37,8 +37,8 @@ export const STEP_GROUPS: readonly StepGroup[] = [
     name: "Drive somewhere",
     icon: "navigation",
     items: [
-      { label: "Drive along the lanes", type: "nav.follow_route", note: "Only uses the lanes drawn on the map." },
-      { label: "Drive to a pose", type: "nav.go_to_pose" },
+      { label: "Follow route", type: "nav.follow_route", note: "Drives only along the lanes drawn on the map, honouring one-way and blocked lanes." },
+      { label: "Direct (ignores the route)", type: "nav.go_to_pose", note: "Drives straight to a pose; the lanes on the map are not used." },
       { label: "Drive through poses", type: "nav.go_through_poses" },
       { label: "Follow waypoints", type: "nav.follow_waypoints" },
       { label: "Follow a path", type: "nav.follow_path" },
@@ -71,9 +71,12 @@ export const STEP_GROUPS: readonly StepGroup[] = [
     ],
   },
   {
-    name: "Ask a person",
+    name: "Ask for an answer",
     icon: "message",
-    items: [{ label: "A question with buttons", type: "ask_user" }],
+    items: [
+      { label: "Ask on the request topics", type: "ros.request", note: "Publishes a request and waits for its answer. iViz's Dashboard answers it, and so can any node." },
+      { label: "A question for the runner's prompt", type: "ask_user", note: "Asked through mission_runner's own prompt service." },
+    ],
   },
   {
     name: "Robot behaviour",

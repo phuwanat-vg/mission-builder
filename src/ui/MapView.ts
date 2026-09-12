@@ -37,6 +37,8 @@ export interface MapViewHost {
   store: RouteStore;
   /** Redraw the tree and the properties column after an edit on the map. */
   refresh(): void;
+  /** Open the Add point dialog (a point typed in as coordinates). */
+  addPointByCoordinates(): void;
 }
 
 interface ToolButton {
@@ -152,7 +154,12 @@ export class MapView {
     ];
     const bar = h("div", { class: "map-toolbar" });
     for (const def of defs) {
-      if (def.name === "fit") bar.append(h("div", { class: "tool-sep" }));
+      if (def.name === "fit") {
+        // A command rather than a tool: it opens a form and does not stay armed.
+        const add = h("button", { class: "tool", title: "Add a point by typing its coordinates" }, icon("plus"), h("span", { text: "Add point" }));
+        add.addEventListener("click", () => this.#host.addPointByCoordinates());
+        bar.append(h("div", { class: "tool-sep" }), add, h("div", { class: "tool-sep" }));
+      }
       const button = h("button", { class: "tool", title: def.title }, icon(def.icon), h("span", { text: def.label }), h("kbd", { text: def.key }));
       button.addEventListener("click", () => this.setTool(def.name));
       bar.append(button);
@@ -304,9 +311,9 @@ export class MapView {
       return;
     }
     const steps: { title: string; text: string; key: string; tool: string; done: boolean }[] = [
-      { title: "Draw the places the robot should visit", text: "Pick the Point tool and click the floor. Drag before you let go to say which way the robot faces there.", key: "N", tool: TOOL_POINT, done: points > 0 },
-      { title: "Connect them into lanes", text: "Pick the Lane tool and drag from one point to another. Hold Shift while you drag for a one-way lane.", key: "L", tool: TOOL_LINK, done: lanes > 0 },
-      { title: "Put the tasks in order in the tree", text: "Use the plus on Tasks in the left column to add what happens, and Deploy to send it to the robot.", key: "", tool: "", done: false },
+      { title: "Place the points the robot should visit", text: "Pick the Point tool and click the floor, dragging to set the heading, or use Add point to type the coordinates.", key: "N", tool: TOOL_POINT, done: points > 0 },
+      { title: "Connect them into lanes", text: "Pick the Lane tool and drag from one point to another. Hold Shift while you drag for a one-way lane, or Ctrl-click points and Connect in order.", key: "L", tool: TOOL_LINK, done: lanes > 0 },
+      { title: "Put the tasks in order in the tree", text: "Create a mission, add a Follow route to each point and the actions after it. Save the project with Ctrl+S, and Deploy sends it to the robot.", key: "", tool: "", done: false },
     ];
     const card = h("div", { class: "panel-card" }, h("div", { class: "card-title" }, icon("route"), h("span", { text: "Start with the map" })));
     for (let i = 0; i < steps.length; i++) {

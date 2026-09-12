@@ -24,10 +24,10 @@ export interface ExportResult {
 }
 
 /** The whole mission as one Python script. */
-export function exportPython(mission: Mission, sites: SitesDoc | null, activeMap: string | null): ExportResult {
+export function exportPython(mission: Mission, sites: SitesDoc | null, activeMap: string | null, topics: { requestTopic?: string; answerTopic?: string } = {}): ExportResult {
   return {
     fileName: `${mission.name}.py`,
-    text: generatePython(mission, { sites, activeMap, fileName: `${mission.name}.json` }),
+    text: generatePython(mission, { sites, activeMap, fileName: `${mission.name}.json`, ...topics }),
     note: "A self-contained nav2_simple_commander script. Put it on the robot, make it executable and run it with the ROS environment sourced.",
   };
 }

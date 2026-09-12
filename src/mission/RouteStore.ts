@@ -1,18 +1,20 @@
 /**
- * Everything Mission Builder edits: the route graph (a map's sites and lanes)
- * and the open mission document, with undo/redo and unsaved-change tracking.
+ * Everything Mission Builder edits: the open project. That is the route graph
+ * of every map (points and lanes), every mission, and the project's name and
+ * settings, with one undo history across all of it.
  *
- * The graph belongs to the map, not to a mission: it is saved with
- * `PUT /api/sites` and shared by every mission. A mission is saved separately
- * with `PUT /api/missions/{name}`, so the two dirty flags are independent.
+ * The project is the single source of truth while editing. Nothing here talks
+ * to a robot or a file: the shell decides when the project is saved, deployed
+ * or replaced by an import, and compares `contentKey()` with what it last saved
+ * or deployed to know whether anything is unsaved.
  *
- * Undo is snapshot based (the documents are a few kilobytes); a drag calls
+ * Undo is snapshot based (a project is a few tens of kilobytes); a drag calls
  * `beginEdit` once and `commit` once, so one drag is one undo entry.
  *
  * Ported from iViz's `src/mission/RouteStore.ts`. The graph half is unchanged;
- * the mission half was replaced, because Mission Builder edits the whole
- * `mission/1` document as a tree instead of the flat list of stops Route mode
- * showed. Anything the tree cannot express is left untouched in the JSON.
+ * the mission half edits whole `mission/1` documents as a tree, and now holds
+ * every mission of the project instead of one fetched from the robot. Anything
+ * the tree cannot express is left untouched in the JSON.
  */
 
 import type { Edge, Interrupt, Mission, Path, Site, SiteKind, SitesDoc, Step, Trigger } from "./types";
@@ -21,10 +23,14 @@ import { allStepIds, assignIds, cloneStepWithFreshIds, deepClone, ensureList, ge
 import { round1, round3, uniqueSiteName } from "./geometry";
 import type { Stop } from "./stops";
 import { STOP_TYPE } from "./stops";
+import type { ProjectDoc, ProjectMeta } from "../project/project";
+import { DEFAULT_PROJECT_NAME, PROJECT_SCHEMA_ID } from "../project/project";
 
 export type Selection =
   | { kind: "none" }
   | { kind: "point"; name: string }
+  /** Several points, in the order they were picked (Ctrl-click). */
+  | { kind: "points"; names: string[] }
   | { kind: "lane"; index: number }
   /** A node of the mission tree, addressed by the id `tree.ts` gives it. */
   | { kind: "node"; id: string };
@@ -33,7 +39,9 @@ export const NO_SELECTION: Selection = { kind: "none" };
 
 interface Snapshot {
   sites: string;
-  mission: string | null;
+  missions: string;
+  meta: string;
+  open: number;
   label: string;
 }
 
@@ -48,15 +56,16 @@ function emptySitesDoc(): SitesDoc {
 export class RouteStore {
   #sites: SitesDoc = emptySitesDoc();
   #mapName = "";
-  #mission: Mission | null = null;
-  #sitesDirty = false;
-  #missionDirty = false;
+  #missions: Mission[] = [];
+  /** Index of the open mission in `#missions`, or -1. */
+  #open = -1;
+  #meta: ProjectMeta = { name: DEFAULT_PROJECT_NAME, settings: {} };
   #undo: Snapshot[] = [];
   #redo: Snapshot[] = [];
   #pending: Snapshot | null = null;
   #selection: Selection = NO_SELECTION;
   #listeners = new Set<Listener>();
-  /** Bumped whenever the graph or the mission changes, so the layer can rebuild. */
+  /** Bumped whenever the graph or a mission changes, so the layer can rebuild. */
   version = 0;
 
   onChange(l: Listener): () => void {
@@ -90,17 +99,19 @@ export class RouteStore {
   get frame(): string {
     return this.#sites.maps?.[this.#mapName]?.frame || "map";
   }
+  /** The mission open in the tree, or null. */
   get mission(): Mission | null {
-    return this.#mission;
+    return this.#missions[this.#open] ?? null;
   }
-  get sitesDirty(): boolean {
-    return this.#sitesDirty;
+  /** Every mission of the project, in the order they are listed. */
+  get missions(): readonly Mission[] {
+    return this.#missions;
   }
-  get missionDirty(): boolean {
-    return this.#missionDirty;
+  get missionNames(): string[] {
+    return this.#missions.map((m) => m.name);
   }
-  get dirty(): boolean {
-    return this.#sitesDirty || this.#missionDirty;
+  get meta(): ProjectMeta {
+    return this.#meta;
   }
   get canUndo(): boolean {
     return this.#undo.length > 0;
@@ -113,66 +124,136 @@ export class RouteStore {
   }
 
   /**
-   * Every `nav.follow_route` step of the mission, in document order, as the
-   * "stops" the map layer numbers and joins into a planned route. Unlike Route
-   * mode this walks the whole tree, so a drive inside an `if` is drawn too.
+   * Every `nav.follow_route` step of the open mission, in document order, as
+   * the "stops" the map layer numbers and joins into a planned route. This
+   * walks the whole tree, so a drive inside an `if` is drawn too.
    */
   get stops(): Stop[] {
     const out: Stop[] = [];
-    if (!this.#mission) return out;
-    for (const visit of walkSteps(this.#mission)) {
+    const mission = this.mission;
+    if (!mission) return out;
+    for (const visit of walkSteps(mission)) {
       if (visit.step.type === STOP_TYPE) out.push({ step: visit.step, actions: [] });
     }
     return out;
   }
 
-  /** Load a freshly fetched sites document; clears history and dirty state. */
-  setSites(doc: SitesDoc, keepMap = true): void {
-    this.#sites = doc && typeof doc === "object" ? doc : emptySitesDoc();
-    if (!this.#sites.maps) this.#sites.maps = {};
-    const names = Object.keys(this.#sites.maps);
-    if (!keepMap || !this.#mapName || !names.includes(this.#mapName)) {
-      this.#mapName = (this.#sites.default_map && names.includes(this.#sites.default_map) ? this.#sites.default_map : names[0]) ?? "";
-    }
-    this.#sitesDirty = false;
+  // ---- the project --------------------------------------------------------
+
+  /**
+   * Replace everything with a project document (New, Open, a restored
+   * autosave). Clears history and selection; no mission is open afterwards.
+   * The document is taken over, not copied.
+   */
+  loadProject(doc: ProjectDoc): void {
+    this.#sites = isRecord(doc.sites) ? doc.sites : emptySitesDoc();
+    if (!isRecord(this.#sites.maps)) this.#sites.maps = {};
+    this.#missions = Array.isArray(doc.missions) ? doc.missions : [];
+    for (const m of this.#missions) assignIds(m);
+    const meta: ProjectMeta = { name: doc.name, settings: isRecord(doc.settings) ? doc.settings : {} };
+    if (typeof doc.description === "string") meta.description = doc.description;
+    if (typeof doc.created_at === "string") meta.created_at = doc.created_at;
+    this.#meta = meta;
+    this.#open = -1;
+    const names = this.mapNames;
+    this.#mapName = (this.#sites.default_map && names.includes(this.#sites.default_map) ? this.#sites.default_map : names[0]) ?? "";
     this.#undo = [];
     this.#redo = [];
+    this.#pending = null;
     this.#selection = NO_SELECTION;
     this.#emit("data");
   }
 
-  setMapName(name: string): void {
-    if (name === this.#mapName) return;
-    this.#mapName = name;
-    if (this.#selection.kind === "point" || this.#selection.kind === "lane") this.#selection = NO_SELECTION;
-    this.#emit("data");
+  /** The project as a document, deep-copied, ready to save or deploy. */
+  toProjectDoc(updatedAt?: string): ProjectDoc {
+    const sites = deepClone(this.#sites);
+    sites.schema = SITES_SCHEMA_ID;
+    // Keys in the contract's order, so saved files read the same way.
+    return {
+      schema: PROJECT_SCHEMA_ID,
+      name: this.#meta.name,
+      ...(this.#meta.description !== undefined ? { description: this.#meta.description } : {}),
+      ...(this.#meta.created_at !== undefined ? { created_at: this.#meta.created_at } : {}),
+      ...(updatedAt !== undefined ? { updated_at: updatedAt } : {}),
+      settings: deepClone(this.#meta.settings),
+      sites,
+      missions: deepClone(this.#missions),
+    };
+  }
+
+  /** Everything a Save writes except timestamps, as a comparable string. */
+  contentKey(): string {
+    return JSON.stringify([this.#meta.name, this.#meta.description ?? "", this.#meta.settings, this.#sites, this.#missions]);
+  }
+
+  /** What a Deploy sends to the robot (maps and missions), as a comparable string. */
+  robotKey(): string {
+    return JSON.stringify([this.#sites, this.#missions]);
+  }
+
+  /** Change the project's name, description or settings (undoable). */
+  setMeta(patch: Partial<Omit<ProjectMeta, "settings">> & { settings?: ProjectMeta["settings"] }, label = "Change the project settings"): void {
+    this.edit(label, () => {
+      const next: ProjectMeta = { ...this.#meta, ...patch };
+      if (patch.description !== undefined && patch.description.trim() === "") delete next.description;
+      this.#meta = next;
+    });
   }
 
   /**
-   * Load a mission (or none); clears the mission dirty flag and history.
-   *
-   * Every step is given an id here if it lacks one — the format says the
-   * editor generates them, and the tree keys its expanded set and its
-   * selection on them, so they have to exist before anything is drawn.
-   * Existing ids are never changed, so the document still round-trips.
+   * Replace the maps and missions in one undoable step (Import from robot).
+   * The open mission stays open when the new content still has it.
    */
-  setMission(mission: Mission | null): void {
-    if (mission) assignIds(mission);
-    this.#mission = mission;
-    this.#missionDirty = false;
-    this.#undo = [];
-    this.#redo = [];
-    if (this.#selection.kind === "node") this.#selection = NO_SELECTION;
-    this.#emit("data");
+  replaceContent(sites: SitesDoc, missions: Mission[], label: string): void {
+    const openName = this.mission?.name ?? null;
+    this.edit(label, () => {
+      this.#sites = sites;
+      if (!isRecord(this.#sites.maps)) this.#sites.maps = {};
+      this.#missions = missions;
+      for (const m of this.#missions) assignIds(m);
+      this.#open = openName === null ? -1 : this.#missions.findIndex((m) => m.name === openName);
+      if (!this.mapNames.includes(this.#mapName)) {
+        const names = this.mapNames;
+        this.#mapName = (this.#sites.default_map && names.includes(this.#sites.default_map) ? this.#sites.default_map : names[0]) ?? "";
+      }
+    });
+    this.#clampSelection();
   }
 
-  markSitesSaved(): void {
-    this.#sitesDirty = false;
+  // ---- missions -----------------------------------------------------------
+
+  /** Open a mission of the project in the tree. Not an edit: nothing to undo. */
+  openMission(name: string | null): boolean {
+    const index = name === null ? -1 : this.#missions.findIndex((m) => m.name === name);
+    if (name !== null && index < 0) return false;
+    if (index === this.#open) return true;
+    this.#open = index;
+    if (this.#selection.kind === "node") this.#selection = NO_SELECTION;
     this.#emit("data");
+    return true;
   }
-  markMissionSaved(): void {
-    this.#missionDirty = false;
-    this.#emit("data");
+
+  /** Add a mission to the project and open it. Returns false when the name is taken. */
+  addMission(mission: Mission, label = "Create a mission"): boolean {
+    if (this.#missions.some((m) => m.name === mission.name)) return false;
+    assignIds(mission);
+    this.edit(label, () => {
+      this.#missions.push(mission);
+      this.#open = this.#missions.length - 1;
+    });
+    if (this.#selection.kind === "node") this.select(NO_SELECTION);
+    return true;
+  }
+
+  removeMission(name: string): void {
+    const index = this.#missions.findIndex((m) => m.name === name);
+    if (index < 0) return;
+    this.edit("Delete a mission", () => {
+      const openName = this.mission?.name ?? null;
+      this.#missions.splice(index, 1);
+      this.#open = openName === null || openName === name ? -1 : this.#missions.findIndex((m) => m.name === openName);
+    });
+    if (this.#selection.kind === "node" && this.#open < 0) this.select(NO_SELECTION);
   }
 
   // ---- selection ----------------------------------------------------------
@@ -181,37 +262,67 @@ export class RouteStore {
     return this.#selection;
   }
   select(sel: Selection): void {
-    if (sel.kind === this.#selection.kind) {
+    const cur = this.#selection;
+    if (sel.kind === cur.kind) {
       if (sel.kind === "none") return;
-      if (sel.kind === "point" && this.#selection.kind === "point" && sel.name === this.#selection.name) return;
-      if (sel.kind === "lane" && this.#selection.kind === "lane" && sel.index === this.#selection.index) return;
-      if (sel.kind === "node" && this.#selection.kind === "node" && sel.id === this.#selection.id) return;
+      if (sel.kind === "point" && cur.kind === "point" && sel.name === cur.name) return;
+      if (sel.kind === "points" && cur.kind === "points" && sel.names.join(" ") === cur.names.join(" ")) return;
+      if (sel.kind === "lane" && cur.kind === "lane" && sel.index === cur.index) return;
+      if (sel.kind === "node" && cur.kind === "node" && sel.id === cur.id) return;
     }
     this.#selection = sel;
     this.#emit("selection");
   }
 
+  /** Ctrl-click on a point: add it to the picked points, or take it out again. */
+  togglePointInSelection(name: string): void {
+    const cur = this.#selection;
+    const names = cur.kind === "points" ? cur.names.slice() : cur.kind === "point" ? [cur.name] : [];
+    const at = names.indexOf(name);
+    if (at >= 0) names.splice(at, 1);
+    else names.push(name);
+    if (names.length === 0) this.select(NO_SELECTION);
+    else if (names.length === 1) this.select({ kind: "point", name: names[0]! });
+    else this.select({ kind: "points", names });
+  }
+
+  /** The points picked on the map, one or several, in picking order. */
+  get selectedPoints(): string[] {
+    const sel = this.#selection;
+    if (sel.kind === "point") return [sel.name];
+    if (sel.kind === "points") return sel.names.slice();
+    return [];
+  }
+
   // ---- history ------------------------------------------------------------
+
+  #snapshot(label: string): Snapshot {
+    return { sites: JSON.stringify(this.#sites), missions: JSON.stringify(this.#missions), meta: JSON.stringify(this.#meta), open: this.#open, label };
+  }
 
   /** Take a snapshot before a change. Pair it with `commit` or `rollback`. */
   beginEdit(label: string): void {
     if (this.#pending) return;
-    this.#pending = { sites: JSON.stringify(this.#sites), mission: this.#mission ? JSON.stringify(this.#mission) : null, label };
+    this.#pending = this.#snapshot(label);
+  }
+
+  get editing(): boolean {
+    return this.#pending !== null;
   }
 
   /** Finish an edit: pushes the snapshot when something actually changed. */
-  commit(opts: { sites?: boolean; mission?: boolean } = {}): void {
+  commit(): void {
     const pending = this.#pending;
     this.#pending = null;
     if (!pending) return;
-    const sitesNow = JSON.stringify(this.#sites);
-    const missionNow = this.#mission ? JSON.stringify(this.#mission) : null;
-    if (sitesNow === pending.sites && missionNow === pending.mission) return;
+    const now = this.#snapshot(pending.label);
+    if (now.sites === pending.sites && now.missions === pending.missions && now.meta === pending.meta) {
+      if (now.open !== pending.open) this.#emit("data");
+      return;
+    }
     this.#undo.push(pending);
     if (this.#undo.length > MAX_HISTORY) this.#undo.shift();
     this.#redo = [];
-    if (opts.sites !== false && sitesNow !== pending.sites) this.#sitesDirty = true;
-    if (opts.mission !== false && missionNow !== pending.mission) this.#missionDirty = true;
     this.version++;
     this.#emit("data");
   }
@@ -225,7 +336,7 @@ export class RouteStore {
   }
 
   /** One edit in one call: `edit("Move point", () => { ... })`. */
-  edit(label: string, fn: () => void, opts: { sites?: boolean; mission?: boolean } = {}): void {
+  edit(label: string, fn: () => void): void {
     this.beginEdit(label);
     try {
       fn();
@@ -233,7 +344,7 @@ export class RouteStore {
       this.rollback();
       throw err;
     }
-    this.commit(opts);
+    this.commit();
   }
 
   undo(): boolean {
@@ -250,22 +361,18 @@ export class RouteStore {
     return true;
   }
 
-  /**
-   * Restore a snapshot, returning the state it replaced. Only the half that
-   * actually changed becomes dirty, so undoing a map edit does not pretend the
-   * mission needs deploying.
-   */
+  /** Restore a snapshot, returning the state it replaced. */
   #swap(snap: Snapshot): Snapshot {
-    const current: Snapshot = { sites: JSON.stringify(this.#sites), mission: this.#mission ? JSON.stringify(this.#mission) : null, label: snap.label };
+    const current = this.#snapshot(snap.label);
     this.#restore(snap);
-    if (current.sites !== snap.sites) this.#sitesDirty = true;
-    if (current.mission !== snap.mission) this.#missionDirty = true;
     return current;
   }
 
   #restore(snap: Snapshot): void {
     this.#sites = JSON.parse(snap.sites) as SitesDoc;
-    this.#mission = snap.mission === null ? null : (JSON.parse(snap.mission) as Mission);
+    this.#missions = JSON.parse(snap.missions) as Mission[];
+    this.#meta = JSON.parse(snap.meta) as ProjectMeta;
+    this.#open = snap.open < this.#missions.length ? snap.open : -1;
     if (!this.mapNames.includes(this.#mapName)) this.#mapName = this.mapNames[0] ?? "";
     this.#clampSelection();
     this.version++;
@@ -275,7 +382,11 @@ export class RouteStore {
   #clampSelection(): void {
     const sel = this.#selection;
     if (sel.kind === "point" && !this.points[sel.name]) this.#selection = NO_SELECTION;
-    else if (sel.kind === "lane" && sel.index >= this.lanes.length) this.#selection = NO_SELECTION;
+    else if (sel.kind === "points") {
+      const names = sel.names.filter((n) => this.points[n]);
+      this.#selection = names.length === 0 ? NO_SELECTION : names.length === 1 ? { kind: "point", name: names[0]! } : { kind: "points", names };
+    } else if (sel.kind === "lane" && sel.index >= this.lanes.length) this.#selection = NO_SELECTION;
+    else if (sel.kind === "node" && !this.mission) this.#selection = NO_SELECTION;
   }
 
   // ---- graph edits --------------------------------------------------------
@@ -290,6 +401,22 @@ export class RouteStore {
     });
     this.select({ kind: "point", name });
     return name;
+  }
+
+  /**
+   * Create a point with a name chosen by the user (Add point by coordinates).
+   * Returns false when that name is already a point of this map.
+   */
+  addNamedPoint(name: string, x: number, y: number, yawDeg: number | null, kind: SiteKind): boolean {
+    const trimmed = name.trim();
+    if (trimmed === "" || this.points[trimmed] || !this.#sites.maps[this.#mapName]) return false;
+    this.edit(`Add ${trimmed}`, () => {
+      const site: Site = { x: round3(x), y: round3(y), kind };
+      if (yawDeg !== null) site.yaw_deg = round1(yawDeg);
+      this.points[trimmed] = site;
+    });
+    this.select({ kind: "point", name: trimmed });
+    return true;
   }
 
   movePoint(name: string, x: number, y: number): void {
@@ -314,7 +441,7 @@ export class RouteStore {
     });
   }
 
-  /** Rename a point and every lane and pose that referenced it. */
+  /** Rename a point and every lane and step of every mission that referenced it. */
   renamePoint(from: string, to: string): string {
     const trimmed = to.trim();
     if (trimmed === "" || trimmed === from) return from;
@@ -331,50 +458,24 @@ export class RouteStore {
         if (lane.from === from) lane.from = trimmed;
         if (lane.to === from) lane.to = trimmed;
       }
-      this.#renameInMission(from, trimmed);
+      for (const mission of this.#missions) renameInMission(mission, from, trimmed);
     });
     if (this.#selection.kind === "point" && this.#selection.name === from) this.select({ kind: "point", name: trimmed });
     return trimmed;
   }
 
-  /** Rewrite only the places that name a site, never free text. */
-  #renameInMission(from: string, to: string): void {
-    if (!this.#mission) return;
-    const swapPose = (value: unknown): unknown => {
-      if (value === from) return to;
-      if (Array.isArray(value)) return value.map(swapPose);
-      if (isRecord(value) && value.site === from) return { ...value, site: to };
-      return value;
-    };
-    for (const visit of walkSteps(this.#mission)) {
-      const step = visit.step;
-      if (step.type === "nav.follow_route") {
-        if (step.to === from) step.to = to;
-        if (step.from === from) step.from = to;
-        continue;
-      }
-      for (const key of ["pose", "goal", "start", "dock_pose"]) {
-        if (step[key] !== undefined) step[key] = swapPose(step[key]);
-      }
-      for (const key of ["poses", "points", "goals"]) {
-        const list = step[key];
-        if (Array.isArray(list)) step[key] = list.map(swapPose);
-      }
-    }
-  }
-
-  /** Lanes and steps that would break if `name` were removed. */
+  /** Lanes and steps (in any mission) that would break if `name` were removed. */
   referencesTo(name: string): string[] {
     const refs: string[] = [];
     for (const lane of this.lanes) {
       if (lane.from === name || lane.to === name) refs.push(`the lane ${lane.from} to ${lane.to}`);
     }
-    if (this.#mission) {
-      for (const visit of walkSteps(this.#mission)) {
+    for (const mission of this.#missions) {
+      for (const visit of walkSteps(mission)) {
         const step = visit.step;
-        const values: unknown[] = [step.to, step.from, step.pose, step.goal, step.start, step.dock_pose];
+        const values: unknown[] = [step.to, step.from, step.pose, step.goal, step.start, step.dock_pose, step.station, ...(Array.isArray(step.through) ? step.through : [])];
         const hit = values.some((v) => v === name || (isRecord(v) && v.site === name));
-        if (hit) refs.push(`the step '${typeof step.name === "string" && step.name !== "" ? step.name : String(step.id ?? step.type)}'`);
+        if (hit) refs.push(`the step '${typeof step.name === "string" && step.name !== "" ? step.name : String(step.id ?? step.type)}' of ${mission.name}`);
       }
     }
     return refs;
@@ -386,7 +487,8 @@ export class RouteStore {
       const map = this.#sites.maps[this.#mapName];
       if (map?.edges) map.edges = map.edges.filter((e) => e.from !== name && e.to !== name);
     });
-    if (this.#selection.kind === "point" && this.#selection.name === name) this.select(NO_SELECTION);
+    this.#clampSelection();
+    this.#emit("selection");
   }
 
   /** Add a lane, unless one already joins the two points. Returns its index. */
@@ -403,6 +505,25 @@ export class RouteStore {
     });
     if (index >= 0) this.select({ kind: "lane", index });
     return index;
+  }
+
+  /**
+   * Join points in the order given with two-way lanes, skipping pairs that a
+   * lane already joins. One undo step. Returns how many lanes were added.
+   */
+  connectInOrder(names: readonly string[]): number {
+    let added = 0;
+    this.edit("Connect points in order", () => {
+      for (let i = 1; i < names.length; i++) {
+        const a = names[i - 1]!;
+        const b = names[i]!;
+        if (a === b || !this.points[a] || !this.points[b]) continue;
+        if (this.lanes.some((e) => (e.from === a && e.to === b) || (e.from === b && e.to === a))) continue;
+        this.lanes.push({ from: a, to: b });
+        added++;
+      }
+    });
+    return added;
   }
 
   updateLane(index: number, patch: Partial<Edge>, label = "Change lane"): void {
@@ -450,7 +571,15 @@ export class RouteStore {
     return name;
   }
 
-  // ---- maps (sites.json) --------------------------------------------------
+  // ---- maps (sites) -------------------------------------------------------
+
+  setMapName(name: string): void {
+    if (name === this.#mapName) return;
+    this.#mapName = name;
+    const sel = this.#selection;
+    if (sel.kind === "point" || sel.kind === "points" || sel.kind === "lane") this.#selection = NO_SELECTION;
+    this.#emit("data");
+  }
 
   addMap(name: string, file: string, frame = "map"): boolean {
     const trimmed = name.trim();
@@ -504,11 +633,11 @@ export class RouteStore {
     });
   }
 
-  // ---- mission edits ------------------------------------------------------
+  // ---- mission edits (the open mission) -----------------------------------
 
-  /** Set (or clear, with `undefined`) a top-level field of the mission. */
+  /** Set (or clear, with `undefined`) a top-level field of the open mission. */
   setMissionField(key: string, value: unknown, label = "Edit mission"): void {
-    const mission = this.#mission;
+    const mission = this.mission;
     if (!mission) return;
     this.edit(label, () => {
       const doc = mission as unknown as Record<string, unknown>;
@@ -517,7 +646,7 @@ export class RouteStore {
     });
   }
 
-  /** Set one parameter of a step that is already in the mission. */
+  /** Set one parameter of a step that is already in a mission. */
   setStepParam(step: Step, key: string, value: unknown, label = "Edit step"): void {
     this.edit(label, () => {
       if (value === undefined) delete step[key];
@@ -525,17 +654,18 @@ export class RouteStore {
     });
   }
 
-  /** A step id that is not taken in this mission. */
+  /** A step id that is not taken in the open mission. */
   freshStepId(): string {
-    return genId("s", this.#mission ? allStepIds(this.#mission) : new Set<string>());
+    const mission = this.mission;
+    return genId("s", mission ? allStepIds(mission) : new Set<string>());
   }
 
   /**
-   * Insert a step into the list at `listPath` (creating `else` and
-   * `before_retry` when they are missing). `index < 0` appends.
+   * Insert a step into the list at `listPath` of the open mission (creating
+   * `else` and `before_retry` when they are missing). `index < 0` appends.
    */
   insertStep(listPath: Path, index: number, step: Step, label = "Add step"): Path | null {
-    const mission = this.#mission;
+    const mission = this.mission;
     if (!mission) return null;
     let at = -1;
     this.edit(label, () => {
@@ -548,7 +678,7 @@ export class RouteStore {
   }
 
   removeStep(path: Path): void {
-    const mission = this.#mission;
+    const mission = this.mission;
     if (!mission || path.length === 0) return;
     this.edit("Delete step", () => {
       const list = getList(mission, path.slice(0, -1));
@@ -559,7 +689,7 @@ export class RouteStore {
 
   /** Copy a step (and everything under it) just after itself, with fresh ids. */
   duplicateStep(path: Path): Step | null {
-    const mission = this.#mission;
+    const mission = this.mission;
     if (!mission || path.length === 0) return null;
     const source = getStepAt(mission, path);
     if (!source) return null;
@@ -580,7 +710,7 @@ export class RouteStore {
    * in the list as it was before the removal.
    */
   nudgeStep(path: Path, delta: -1 | 1): boolean {
-    const mission = this.#mission;
+    const mission = this.mission;
     if (!mission || path.length === 0) return false;
     const list = getList(mission, path.slice(0, -1));
     const index = path[path.length - 1];
@@ -596,7 +726,7 @@ export class RouteStore {
 
   /** `enabled: false` skips the step; the field is removed when turning it on. */
   setStepEnabled(path: Path, enabled: boolean): void {
-    const mission = this.#mission;
+    const mission = this.mission;
     if (!mission) return;
     const step = getStepAt(mission, path);
     if (!step) return;
@@ -613,7 +743,7 @@ export class RouteStore {
    * (dropping a container inside its own subtree).
    */
   moveStep(fromPath: Path, toList: Path, toIndex: number): Path | null {
-    const mission = this.#mission;
+    const mission = this.mission;
     if (!mission || fromPath.length === 0) return null;
     if (toList.length >= fromPath.length && fromPath.every((seg, i) => toList[i] === seg)) return null;
     let result: Path | null = null;
@@ -637,7 +767,7 @@ export class RouteStore {
   // ---- triggers and interrupts --------------------------------------------
 
   addTrigger(kind: "triggers" | "interrupts", trigger: Trigger | Interrupt): number {
-    const mission = this.#mission;
+    const mission = this.mission;
     if (!mission) return -1;
     let index = -1;
     this.edit(kind === "triggers" ? "Add a trigger" : "Add an interrupt", () => {
@@ -655,7 +785,7 @@ export class RouteStore {
   }
 
   removeTrigger(kind: "triggers" | "interrupts", index: number): void {
-    const mission = this.#mission;
+    const mission = this.mission;
     if (!mission) return;
     this.edit(kind === "triggers" ? "Delete a trigger" : "Delete an interrupt", () => {
       const list: Trigger[] | undefined = kind === "triggers" ? mission.triggers : mission.interrupts;
@@ -664,7 +794,7 @@ export class RouteStore {
   }
 
   setTriggerParam(kind: "triggers" | "interrupts", index: number, key: string, value: unknown): void {
-    const mission = this.#mission;
+    const mission = this.mission;
     if (!mission) return;
     const list: Trigger[] | undefined = kind === "triggers" ? mission.triggers : mission.interrupts;
     const item = list?.[index];
@@ -678,9 +808,10 @@ export class RouteStore {
 
   // ---- misc ---------------------------------------------------------------
 
-  /** A deep copy of the mission, for validation and deployment. */
+  /** A deep copy of the open mission, for validation and export. */
   missionCopy(): Mission | null {
-    return this.#mission ? deepClone(this.#mission) : null;
+    const mission = this.mission;
+    return mission ? deepClone(mission) : null;
   }
 
   sitesCopy(): SitesDoc {
@@ -690,5 +821,32 @@ export class RouteStore {
   #emit(reason: "data" | "selection"): void {
     if (reason === "data") this.version++;
     for (const l of this.#listeners) l(reason);
+  }
+}
+
+/** Rewrite only the places of a mission that name a site, never free text. */
+function renameInMission(mission: Mission, from: string, to: string): void {
+  const swapPose = (value: unknown): unknown => {
+    if (value === from) return to;
+    if (Array.isArray(value)) return value.map(swapPose);
+    if (isRecord(value) && value.site === from) return { ...value, site: to };
+    return value;
+  };
+  for (const visit of walkSteps(mission)) {
+    const step = visit.step;
+    if (step.type === "nav.follow_route") {
+      if (step.to === from) step.to = to;
+      if (step.from === from) step.from = to;
+      if (Array.isArray(step.through)) step.through = step.through.map((v) => (v === from ? to : v));
+      continue;
+    }
+    if (step.type === "ros.request" && step.station === from) step.station = to;
+    for (const key of ["pose", "goal", "start", "dock_pose"]) {
+      if (step[key] !== undefined) step[key] = swapPose(step[key]);
+    }
+    for (const key of ["poses", "points", "goals"]) {
+      const list = step[key];
+      if (Array.isArray(list)) step[key] = list.map(swapPose);
+    }
   }
 }

@@ -196,7 +196,7 @@ export class RouteLayer extends Layer {
     this.#pendingMesh = emptyMesh();
     this.#highlightMesh.material.opacity = 0.3;
     this.#drivingMesh.material.opacity = 0.9;
-    this.root.add(this.#highlightMesh, this.#laneMesh, this.#routeMesh, this.#drivingMesh, this.#pendingMesh, this.#pointsGroup, this.#labelGroup);
+    this.root.add(this.#focusMesh, this.#highlightMesh, this.#laneMesh, this.#routeMesh, this.#drivingMesh, this.#pendingMesh, this.#pointsGroup, this.#labelGroup);
   }
 
   onMessage(): void {
@@ -356,7 +356,7 @@ export class RouteLayer extends Layer {
         if (!a || !b) continue;
         pushRibbon(rpos, rcol, a.x, a.y, b.x, b.y, routeWidth, color, Z_ROUTE);
       }
-      this.#legRanges.push({ stopIndex: leg.stopIndex, start, count: rpos.length / 3 - start, route: leg.route.slice() });
+      this.#legRanges.push({ stopIndex: leg.stopIndex, start, count: rpos.length / 3 - start, route: leg.route.slice(), problem: leg.problem !== "" });
     }
     setGeometry(this.#routeMesh, rpos, rcol);
     this.#routeMesh.material.opacity = 1;
@@ -404,7 +404,9 @@ export class RouteLayer extends Layer {
     this.status = Object.keys(sites).length === 0 ? "Nothing drawn on this map yet" : "";
   }
 
-  #legRanges: { stopIndex: number; start: number; count: number; route: string[] }[] = [];
+  #legRanges: { stopIndex: number; start: number; count: number; route: string[]; problem: boolean }[] = [];
+  #focusStepId: string | null = null;
+  #focusMesh: Mesh<BufferGeometry, MeshBasicMaterial> = emptyMesh();
 
   /**
    * One point. Everything inside the group is in screen pixels; the group is
@@ -491,7 +493,7 @@ export class RouteLayer extends Layer {
   #applyHighlight(): void {
     const sel = this.#store.selection;
     for (const p of this.#points) {
-      const selected = sel.kind === "point" && sel.name === p.name;
+      const selected = (sel.kind === "point" && sel.name === p.name) || (sel.kind === "points" && sel.names.includes(p.name));
       const hovered = this.#hover?.kind === "point" && this.#hover.name === p.name;
       // Selected is a filled accent dot inside a thin accent ring; hover is
       // the ring on its own.
@@ -512,6 +514,40 @@ export class RouteLayer extends Layer {
     setGeometry(this.#highlightMesh, pos, col);
     this.#highlightMesh.material.opacity = selectedLane ? 0.45 : 0.2;
     this.#highlightMesh.material.transparent = true;
+    this.#applyFocus();
+  }
+
+  /**
+   * The Follow route selected in the tree: the soft accent band runs under
+   * its whole planned chain, so the route that task drives stands out from
+   * the rest of the mission's route. A leg with no route gets the band in the
+   * error colour.
+   */
+  setFocusStep(stepId: string | null): void {
+    if (stepId === this.#focusStepId) return;
+    this.#focusStepId = stepId;
+    this.#applyFocus();
+  }
+
+  #applyFocus(): void {
+    const pos: number[] = [];
+    const col: number[] = [];
+    const stops = this.#store.stops;
+    const index = this.#focusStepId === null ? -1 : stops.findIndex((s) => s.step.id === this.#focusStepId);
+    const leg = index >= 0 ? this.#legRanges.find((l) => l.stopIndex === index) : undefined;
+    if (leg) {
+      const sites = this.#store.points;
+      const color = new Color(leg.problem ? this.#colors.err : this.#colors.accent);
+      const width = this.#builtWpp * HIGHLIGHT_PX * 1.4;
+      for (let i = 1; i < leg.route.length; i++) {
+        const a = sites[leg.route[i - 1]!];
+        const b = sites[leg.route[i]!];
+        if (a && b) pushRibbon(pos, col, a.x, a.y, b.x, b.y, width, color, Z_HIGHLIGHT);
+      }
+    }
+    setGeometry(this.#focusMesh, pos, col);
+    this.#focusMesh.material.opacity = 0.35;
+    this.#focusMesh.material.transparent = true;
   }
 
   /** Colour the stops by run status and pick out the leg being driven. */

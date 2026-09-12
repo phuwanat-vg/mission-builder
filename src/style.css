@@ -722,6 +722,11 @@ kbd {
   top: 16px;
   width: 320px;
   z-index: 4;
+  /* The floor under the card stays clickable: a typed point can land there. */
+  pointer-events: none;
+}
+.guide-card button {
+  pointer-events: auto;
 }
 .guide-card[hidden] {
   display: none;
@@ -1300,4 +1305,215 @@ button.menu-row:hover:not(:disabled) {
 .pose-control input.mono {
   font-family: var(--mono);
   font-size: 11px;
+}
+
+/* ---------- the project in the top bar ---------- */
+button.project-name {
+  max-width: 260px;
+  background: transparent;
+  border-color: transparent;
+  font-weight: 500;
+  gap: 6px;
+}
+button.project-name:hover:not(:disabled) {
+  background: var(--hover);
+  border-color: var(--border);
+}
+.project-name .project-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-name .dirty-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: none;
+}
+.project-name .dirty-dot[hidden] {
+  display: none;
+}
+
+/* ---------- dialogs ---------- */
+.modal.small {
+  width: min(460px, calc(100vw - 60px));
+}
+.modal.medium {
+  width: min(620px, calc(100vw - 60px));
+}
+.modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+  overflow: auto;
+  min-height: 0;
+}
+.modal-error {
+  margin: 10px 0 0;
+  color: var(--err);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.modal-error[hidden] {
+  display: none;
+}
+.modal-buttons {
+  margin-top: 14px;
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+.field-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+}
+.field-help {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+.field input,
+.field select,
+.field textarea {
+  width: 100%;
+}
+.field .row input {
+  flex: 1;
+}
+.field-row {
+  display: flex;
+  gap: 10px;
+}
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+}
+
+/* ---------- ordered lists in a form (through, answers, data) ---------- */
+.list-control {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.list-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.list-item input {
+  flex: 1;
+  min-width: 0;
+}
+.list-item input.kv-key-input {
+  flex: 0 0 34%;
+}
+.list-item.bad .list-name {
+  color: var(--err);
+}
+.list-no {
+  width: 16px;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+  flex: none;
+}
+.list-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.list-item button.icon-only {
+  min-height: 24px;
+  padding: 2px 4px;
+}
+.list-control > button {
+  align-self: flex-start;
+}
+
+/* ---------- lanes, routes and arrivals ---------- */
+.direction-choices {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 5px;
+}
+button.direction {
+  justify-content: center;
+  min-height: 34px;
+  font-size: 13px;
+  font-weight: 500;
+}
+button.direction.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+.lane-glyph {
+  width: 16px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--accent);
+}
+button.list-row .pill {
+  margin-left: auto;
+}
+button.list-row.indent {
+  padding-left: 22px;
+}
+.route-chain {
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  background: var(--surface);
+  overflow-wrap: anywhere;
+}
+.route-chain.bad {
+  border-left-color: var(--err);
+}
+.arrival-card {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  margin-bottom: 6px;
+  background: var(--surface);
+}
+.arrival-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+.arrival-mission {
+  font-weight: 600;
+  flex: 1;
+}
+.arrival-when {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 4px;
+}
+.tree-empty {
+  padding: 10px 12px;
+}
+.request-preview {
+  flex: none;
+  max-height: 220px;
+  margin: 4px 0;
 }

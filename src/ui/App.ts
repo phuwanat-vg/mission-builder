@@ -1,24 +1,29 @@
 /**
  * The application shell: the top bar, the three columns and the Activity bar,
- * and everything that talks to the robot.
+ * the project file, and everything that talks to the robot.
  *
- * One `foxglove_bridge` WebSocket carries all of it: the map, TF and the live
- * robot as ordinary topics, and the whole `mission_runner` HTTP API through the
- * ROS service `/mission/api`. Every piece degrades on its own — no bridge, no
- * `/mission/api`, or a runner that is offline — and says so in a sentence while
- * the mission can still be edited and exported.
+ * The open project is the single source of truth while editing. It opens and
+ * saves with no robot connected; connecting to a robot never replaces it.
+ * Import from robot and Deploy project to robot are the two explicit actions
+ * that move things between the project and the robot.
+ *
+ * One `foxglove_bridge` WebSocket carries everything robot-side: the map, TF
+ * and the live robot as ordinary topics, and the whole `mission_runner` HTTP
+ * API through the ROS service `/mission/api`. Every piece degrades on its own
+ * and says so in a sentence while the project can still be edited, saved and
+ * exported.
  */
 
 import { FoxgloveConnection } from "../net/FoxgloveConnection";
 import type { ConnectionState } from "../net/FoxgloveConnection";
-import { MissionApi, MissionApiError } from "../mission/MissionApi";
+import { MissionApi, MissionApiError, isMissingEndpoint } from "../mission/MissionApi";
 import type { ApiFinding, ConnectorState, MissionSummary, Run, RunnerEvent, RunnerStatus } from "../mission/MissionApi";
 import { RouteStore } from "../mission/RouteStore";
-import { assignIds } from "../mission/ids";
+import { assignIds, countSteps, findStep, getList, getStepAt, walkSteps } from "../mission/ids";
 import { validate } from "../mission/validate";
 import type { Capabilities } from "../mission/MissionApi";
-import type { Finding, Mission, Path, SitesDoc } from "../mission/types";
-import { MISSION_SCHEMA_ID, SITES_SCHEMA_ID } from "../mission/types";
+import type { Edge, Finding, Mission, Path, Site, SitesDoc, Step } from "../mission/types";
+import { DEFAULT_ANSWER_TOPIC, DEFAULT_REQUEST_TOPIC, MISSION_NAME_RE, MISSION_SCHEMA_ID, SITES_SCHEMA_ID, isRecord } from "../mission/types";
 import { loadSettings, saveSettings } from "../state/settings";
 import type { AppSettings } from "../state/settings";
 import { THEME_LABELS, THEME_NAMES, applyTheme } from "./theme";
@@ -35,16 +40,25 @@ import { Activity } from "./Activity";
 import { MapView } from "./MapView";
 import { exportBehaviorTrees, exportPython, showExport } from "./exports";
 import type { FormContext } from "./ActionForm";
-import { openMenu } from "./StepPicker";
-import { poseSiteRef } from "../mission/blocks";
-import { getStepAt, walkSteps } from "../mission/ids";
+import { openMenu, openStepPicker, stepForChoice } from "./StepPicker";
+import type { MenuItem } from "./StepPicker";
+import { newStep, poseSiteRef, stepTitle, triggerSummary } from "../mission/blocks";
 import { buildTree, findNode } from "../mission/tree";
+import { STOP_TYPE, planRoute } from "../mission/stops";
+import type { Arrival, Stop } from "../mission/stops";
+import { ProjectSession } from "../project/ProjectSession";
+import { baseName, nowIso, parseProject } from "../project/project";
+import { hasFileSystem } from "../project/files";
+import { openAddPointDialog } from "./AddPointDialog";
+import { askImportMode, openDeployDialog, openProjectSettings } from "./ProjectDialogs";
+import type { DeployPlan } from "./ProjectDialogs";
 
 export class App {
   readonly conn = new FoxgloveConnection();
   readonly store = new RouteStore();
   readonly api = new MissionApi(this.conn);
   readonly settings: AppSettings;
+  readonly session: ProjectSession;
 
   #tree: MissionTree;
   #props: Properties;
@@ -58,6 +72,9 @@ export class App {
   #connectBtn!: HTMLButtonElement;
   #statusEl!: HTMLElement;
   #stateEl!: HTMLElement;
+  #projectBtn!: HTMLButtonElement;
+  #projectLabel!: HTMLElement;
+  #dirtyDot!: HTMLElement;
   #runBtn!: HTMLButtonElement;
   #pauseBtn!: HTMLButtonElement;
   #stopBtn!: HTMLButtonElement;
@@ -68,7 +85,8 @@ export class App {
   #noticeEl!: HTMLElement;
   #toastsEl!: HTMLElement;
 
-  #missions: MissionSummary[] = [];
+  /** The missions the robot has, when connected. The tree lists the project's. */
+  #robotMissions: MissionSummary[] = [];
   #connectors: Record<string, ConnectorState> = {};
   #capabilities: Capabilities | null = null;
   #findings: Finding[] = [];
@@ -77,6 +95,9 @@ export class App {
   #status: RunnerStatus | null = null;
   #lastToast = new Map<string, number>();
   #busy = false;
+  /** `store.robotKey()` when the robot was last known to match the project (deploy, import). */
+  #deployedKey: string | null = null;
+  #lastTitle = "";
 
   constructor(root: HTMLElement) {
     this.settings = loadSettings();
@@ -87,10 +108,11 @@ export class App {
 
     this.#tree = new MissionTree({
       store: this.store,
-      missionList: () => this.#missions,
-      openMission: (name) => void this.#openMission(name),
+      missionList: () => this.#missionSummaries(),
+      openMission: (name) => this.#openMission(name),
       createMission: () => this.#createMission(),
-      deleteMission: (name) => void this.#deleteMission(name),
+      deleteMission: (name) => this.#deleteMission(name),
+      prepareStep: (step) => this.#prepareStep(step),
       exportPython: () => this.#exportPython(),
       exportBt: () => this.#exportBt(),
       findings: () => this.#findings,
@@ -106,6 +128,9 @@ export class App {
       refresh: () => this.refresh(),
       focusPoint: (name) => this.map.focusPoint(name),
       toast: (m, k) => this.toast(m, k),
+      revealStep: (mission, stepId) => this.#revealStep(mission, stepId),
+      addActionAt: (arrival, anchor) => this.#addActionAt(arrival, anchor),
+      addFollowRouteTo: (point) => this.#addFollowRouteTo(point),
     });
     this.#maps = new MapsPanel({
       store: this.store,
@@ -127,6 +152,15 @@ export class App {
       conn: this.conn,
       store: this.store,
       refresh: () => this.refresh(),
+      addPointByCoordinates: () => this.#addPointDialog(),
+    });
+    this.session = new ProjectSession({
+      store: this.store,
+      settings: this.settings,
+      saveSettings: () => this.#save(),
+      toast: (m, k) => this.toast(m, k),
+      loaded: () => this.#onProjectLoaded(),
+      saved: () => this.refresh(),
     });
 
     treeSlot.replaceWith(this.#tree.element);
@@ -143,6 +177,7 @@ export class App {
     this.api.onEvent((e) => this.#onEvent(e));
 
     window.addEventListener("keydown", (ev) => this.#onKey(ev));
+    void this.#guardWindowClose();
 
     this.#tree.setCollapsed(this.settings.treeCollapsed);
     this.#activity.setOpen(this.settings.activityOpen);
@@ -150,11 +185,14 @@ export class App {
     this.refresh();
     this.#notice(this.api.unavailableReason || "");
 
-    if (this.settings.autoConnect && this.settings.url) this.#connect();
+    void this.session.start().then(() => {
+      if (this.settings.autoConnect && this.#urlInput.value.trim() !== "") this.#connect();
+    });
     void this.#initUpdater();
   }
 
   dispose(): void {
+    this.session.dispose();
     this.conn.autoReconnect = false;
     this.conn.disconnect();
     this.map.dispose();
@@ -164,6 +202,16 @@ export class App {
 
   #buildShell(root: HTMLElement): { treeSlot: HTMLElement; viewSlot: HTMLElement; propsSlot: HTMLElement; activitySlot: HTMLElement } {
     root.innerHTML = "";
+
+    const fileBtn = h("button", { class: "file-btn", title: "New, open, save and deploy the project" }, icon("folder"), "File");
+    fileBtn.addEventListener("click", () => {
+      const rect = fileBtn.getBoundingClientRect();
+      this.#openFileMenu(rect.left, rect.bottom + 4);
+    });
+    this.#projectLabel = h("span", { class: "project-label", text: "" });
+    this.#dirtyDot = h("span", { class: "dirty-dot", title: "Unsaved changes" });
+    this.#projectBtn = h("button", { class: "project-name", title: "Project settings" }, this.#projectLabel, this.#dirtyDot);
+    this.#projectBtn.addEventListener("click", () => this.#openProjectSettings());
 
     this.#urlInput = h("input", { class: "url-input", type: "text", value: this.settings.url, placeholder: "ws://<robot-ip>:8765" });
     this.#urlInput.addEventListener("keydown", (ev) => {
@@ -193,13 +241,12 @@ export class App {
     this.#stopBtn = h("button", { class: "big danger solid" }, icon("stop"), "Stop");
     this.#stopBtn.addEventListener("click", () => void this.#stop());
     this.#deployBtn = h("button", { class: "big" }, icon("upload"), "Deploy");
-    this.#deployBtn.addEventListener("click", () => void this.#deploy());
+    this.#deployBtn.addEventListener("click", () => this.#openDeploy());
 
     const menuBtn = h("button", { class: "icon-only", title: "More" }, icon("more"));
     menuBtn.addEventListener("click", () => {
       const rect = menuBtn.getBoundingClientRect();
       openMenu(rect.left - 180, rect.bottom + 4, [
-        { label: "Reload from the robot", icon: "refresh", run: () => void this.#reload() },
         { label: "Undo", icon: "undo", hint: "Ctrl+Z", disabled: !this.store.canUndo, run: () => this.#undo() },
         { label: "Redo", icon: "redo", hint: "Ctrl+Y", disabled: !this.store.canRedo, run: () => this.#redo() },
         { label: "-", run: () => undefined },
@@ -217,6 +264,8 @@ export class App {
       "div",
       { class: "topbar" },
       h("div", { class: "brand" }, "Mission", h("span", { text: " Builder" })),
+      fileBtn,
+      this.#projectBtn,
       this.#treeToggle,
       this.#urlInput,
       this.#connectBtn,
@@ -245,6 +294,41 @@ export class App {
 
     root.append(topbar, this.#noticeEl, treeSlot, viewSlot, propsSlot, activitySlot);
     return { treeSlot, viewSlot, propsSlot, activitySlot };
+  }
+
+  #openFileMenu(x: number, y: number): void {
+    const connected = this.api.available;
+    const items: MenuItem[] = [
+      { label: "New project", icon: "file", hint: "Ctrl+N", run: () => void this.session.newProject() },
+      { label: "Open…", icon: "folder", hint: "Ctrl+O", run: () => void this.session.open() },
+      { label: "Open recent", icon: "clock", hint: "▸", run: () => this.#openRecentMenu(x, y) },
+      { label: "Save", icon: "download", hint: "Ctrl+S", run: () => void this.session.save() },
+      { label: "Save as…", icon: "copy", hint: "Ctrl+Shift+S", run: () => void this.session.saveAs() },
+      { label: "Close", icon: "close", run: () => void this.session.close() },
+      { label: "-", run: () => undefined },
+      { label: "Project settings…", icon: "settings", run: () => this.#openProjectSettings() },
+      { label: "-", run: () => undefined },
+      { label: "Import from robot…", icon: "refresh", disabled: !connected, run: () => void this.#importFromRobot() },
+      { label: "Deploy project to robot…", icon: "upload", disabled: !connected, run: () => this.#openDeploy() },
+    ];
+    openMenu(x, y, items);
+  }
+
+  #openRecentMenu(x: number, y: number): void {
+    if (!hasFileSystem()) {
+      openMenu(x, y, [{ label: "Recent projects are kept by the desktop app.", disabled: true, run: () => undefined }]);
+      return;
+    }
+    const recent = this.settings.recentProjects;
+    if (recent.length === 0) {
+      openMenu(x, y, [{ label: "No projects opened yet.", disabled: true, run: () => undefined }]);
+      return;
+    }
+    openMenu(
+      x,
+      y,
+      recent.map((path) => ({ label: baseName(path), icon: "file" as const, hint: shortDir(path), run: () => void this.session.openRecent(path) })),
+    );
   }
 
   /** Drafting or Dark, remembered and applied without a reload. */
@@ -290,6 +374,17 @@ export class App {
     this.map.renderGuide();
     this.#syncButtons();
     this.#syncMapHighlight();
+    this.#syncTitle();
+  }
+
+  #validateContext(): Parameters<typeof validate>[1] {
+    return {
+      sites: this.store.sites,
+      activeMap: this.store.mapName,
+      missions: this.#knownMissionNames(),
+      connectors: Object.keys(this.#connectors).length > 0 ? Object.keys(this.#connectors) : null,
+      capabilities: this.#capabilities,
+    };
   }
 
   #revalidate(): void {
@@ -298,23 +393,19 @@ export class App {
       this.#findings = [];
       return;
     }
-    const result = validate(mission, {
-      sites: this.store.sites,
-      activeMap: this.store.mapName,
-      missions: this.#missions.map((m) => m.name),
-      connectors: Object.keys(this.#connectors).length > 0 ? Object.keys(this.#connectors) : null,
-      capabilities: this.#capabilities,
-    });
-    this.#findings = [...result.errors, ...result.warnings];
+    const result = validate(mission, this.#validateContext());
+    this.#findings = [...result.errors, ...routeFindings(mission, this.store.points, this.store.lanes), ...result.warnings];
   }
 
   /**
-   * A selected step that drives somewhere lights that point on the map, and a
-   * selected point marks the steps that drive to it in the tree.
+   * A selected step that drives somewhere lights that point on the map (and a
+   * Follow route its whole planned chain), and a selected point marks the
+   * steps that drive to it in the tree.
    */
   #syncMapHighlight(): void {
     const sel = this.store.selection;
     const mission = this.store.mission;
+    const layer = this.map.routeLayer;
     if (sel.kind === "point") {
       const linked = new Set<string>();
       if (mission) {
@@ -323,28 +414,30 @@ export class App {
         }
       }
       this.#tree.setLinked(linked);
-      this.map.routeLayer.refreshHighlight();
+      layer.setFocusStep(null);
+      layer.refreshHighlight();
       return;
     }
     this.#tree.setLinked(new Set());
     if (sel.kind !== "node" || !sel.id.startsWith("step:")) {
-      if (sel.kind !== "lane") this.map.routeLayer.setHover(null);
-      this.map.routeLayer.refreshHighlight();
+      if (sel.kind !== "lane") layer.setHover(null);
+      layer.setFocusStep(null);
+      layer.refreshHighlight();
       return;
     }
     const tree = mission ? buildTree(mission) : null;
     const node = tree ? findNode(tree, sel.id) : null;
     const step = node?.path && mission ? getStepAt(mission, node.path) : null;
     const site = step ? siteOfStep(step) : null;
-    this.map.routeLayer.setHover(site ? { kind: "point", name: site } : null);
-    this.map.routeLayer.refreshHighlight();
+    layer.setHover(site ? { kind: "point", name: site } : null);
+    layer.setFocusStep(step?.type === STOP_TYPE && typeof step.id === "string" ? step.id : null);
+    layer.refreshHighlight();
   }
 
   #syncButtons(): void {
     const connected = this.api.available;
     const state = this.#status?.state ?? "idle";
     const mission = this.store.mission;
-    const errors = this.#findings.filter((f) => f.level === "error").length;
 
     this.#runBtn.disabled = !connected || !mission || state === "running";
     this.#runBtn.title = !connected ? this.api.unavailableReason : !mission ? "Open a mission first." : state === "running" ? "Something is already running." : `Run ${mission.name} on the robot now.`;
@@ -353,19 +446,375 @@ export class App {
     this.#stopBtn.disabled = !connected;
     this.#stopBtn.title = connected ? "Cancel the run, the queue and anything suspended." : this.api.unavailableReason;
 
-    const what = !mission ? "" : this.store.missionDirty && this.store.sitesDirty ? " mission and map" : this.store.missionDirty ? " mission" : this.store.sitesDirty ? " map" : "";
-    setButtonContent(this.#deployBtn, "upload", what === "" ? "Deployed" : `Deploy${what}`);
-    this.#deployBtn.disabled = !connected || !mission || what === "" || this.#busy;
+    const upToDate = this.#deployedKey !== null && this.#deployedKey === this.store.robotKey();
+    setButtonContent(this.#deployBtn, "upload", upToDate ? "Deployed" : "Deploy");
+    this.#deployBtn.disabled = !connected || this.#busy;
     this.#deployBtn.title = !connected
       ? this.api.unavailableReason
-      : what === ""
-        ? "Nothing has changed since the last deploy."
-        : errors > 0
-          ? `Deploy checks the mission first; ${errors} ${errors === 1 ? "problem" : "problems"} must be fixed.`
-          : `Saves the${what} to the robot.`;
-    this.#deployBtn.classList.toggle("primary", what !== "" && errors === 0);
+      : upToDate
+        ? "The robot has this project's maps and missions. Deploy again to send them anyway."
+        : "Send the project's maps and missions to the robot.";
+    this.#deployBtn.classList.toggle("primary", connected && !upToDate);
 
     this.#treeToggle.classList.toggle("active", !this.#tree.collapsed);
+  }
+
+  /** The title bar and the top bar show the project name, with a dot when unsaved. */
+  #syncTitle(): void {
+    const name = this.store.meta.name;
+    const dirty = this.session?.dirty ?? false;
+    this.#projectLabel.textContent = name;
+    this.#dirtyDot.hidden = !dirty;
+    this.#projectBtn.title = `${name}${dirty ? " has unsaved changes" : ""}. ${this.session?.path ?? "Not saved to a file yet."} Click for the project settings.`;
+    const title = `${dirty ? "● " : ""}${name} — Mission Builder`;
+    if (title === this.#lastTitle) return;
+    this.#lastTitle = title;
+    document.title = title;
+    if (isDesktop()) {
+      void import("@tauri-apps/api/window")
+        .then((w) => w.getCurrentWindow().setTitle(title))
+        .catch(() => undefined);
+    }
+  }
+
+  // ---- the project --------------------------------------------------------
+
+  #onProjectLoaded(): void {
+    const store = this.store;
+    this.#deployedKey = null;
+    this.#runState.clear();
+    const url = store.meta.settings.robot_url;
+    if (typeof url === "string" && url !== "" && this.conn.state === "disconnected") this.#urlInput.value = url;
+    const wanted = store.missionNames.includes(this.settings.lastMission) ? this.settings.lastMission : (store.missionNames[0] ?? null);
+    store.openMission(wanted);
+    this.#tree.reloadExpanded();
+    this.refresh();
+    if (wanted) this.#tree.reveal("mission");
+    this.map.fit();
+  }
+
+  #openProjectSettings(): void {
+    openProjectSettings(this.store, this.#urlInput.value.trim(), () => this.refresh());
+  }
+
+  /** The project's missions for the tree, with what the robot says about each. */
+  #missionSummaries(): MissionSummary[] {
+    const robot = new Map(this.#robotMissions.map((m) => [m.name, m]));
+    return this.store.missions.map((m) => {
+      const summary: MissionSummary = { name: m.name, steps: countSteps(m.flow ?? []) };
+      if (m.title) summary.title = m.title;
+      const first = m.triggers?.[0];
+      if (first) summary.triggers = [triggerSummary(first)];
+      const onRobot = robot.get(m.name);
+      if (onRobot?.state) summary.state = onRobot.state;
+      return summary;
+    });
+  }
+
+  #knownMissionNames(): string[] {
+    return [...new Set([...this.store.missionNames, ...this.#robotMissions.map((m) => m.name)])];
+  }
+
+  #openMission(name: string): void {
+    if (!this.store.openMission(name)) {
+      this.toast(`The project has no mission called ${name}.`);
+      return;
+    }
+    this.settings.lastMission = name;
+    this.#save();
+    this.#tree.reloadExpanded();
+    this.#runState.clear();
+    this.refresh();
+    this.#tree.reveal("mission");
+    // The tree is the editor: give it the keyboard without asking for a click.
+    this.#tree.focus();
+  }
+
+  #createMission(): void {
+    const suggested = uniqueName(this.store.missionNames, "new_mission");
+    const answer = prompt("What should the mission be called? Lowercase letters, digits, underscore and hyphen.", suggested);
+    if (answer === null) return;
+    const name = answer.trim();
+    if (!MISSION_NAME_RE.test(name)) {
+      this.toast("A mission name is lowercase letters, digits, underscore and hyphen, starting with a letter, at most 64 characters.");
+      return;
+    }
+    const mission: Mission = { schema: MISSION_SCHEMA_ID, name, title: name.replace(/[_-]+/g, " "), flow: [] };
+    if (!this.store.addMission(mission)) {
+      this.toast(`The project already has a mission called ${name}.`);
+      return;
+    }
+    this.settings.lastMission = name;
+    this.#save();
+    this.#tree.reloadExpanded();
+    this.refresh();
+    this.#tree.reveal("mission");
+  }
+
+  #deleteMission(name: string): void {
+    const onRobot = this.#robotMissions.some((m) => m.name === name);
+    const robotSentence = onRobot ? " The robot keeps its copy until the project is deployed with Replace missions on the robot." : "";
+    if (!confirm(`Delete the mission ${name} from the project? Ctrl+Z brings it back.${robotSentence}`)) return;
+    this.store.removeMission(name);
+    this.refresh();
+  }
+
+  /** What a new step takes from the project: the request topics. */
+  #prepareStep(step: Step): void {
+    if (step.type !== "ros.request") return;
+    const s = this.store.meta.settings;
+    step.request_topic = typeof s.request_topic === "string" && s.request_topic !== "" ? s.request_topic : DEFAULT_REQUEST_TOPIC;
+    step.answer_topic = typeof s.answer_topic === "string" && s.answer_topic !== "" ? s.answer_topic : DEFAULT_ANSWER_TOPIC;
+  }
+
+  #revealStep(mission: string, stepId: string): void {
+    if (this.store.mission?.name !== mission) this.#openMission(mission);
+    this.#tree.reveal(`step:${stepId}`);
+    this.refresh();
+  }
+
+  /**
+   * Add action here: pick a step and insert it after the actions that already
+   * follow that Follow route, in its mission (opened first when needed).
+   */
+  #addActionAt(arrival: Arrival, anchor: HTMLElement): void {
+    const rect = anchor.getBoundingClientRect();
+    const fixed = h("div", { style: `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;pointer-events:none` });
+    document.body.appendChild(fixed);
+    const to = typeof arrival.step.to === "string" ? arrival.step.to : "";
+    openStepPicker(fixed, `Add an action at ${to} in ${arrival.mission}`, (choice) => {
+      if (this.store.mission?.name !== arrival.mission) this.#openMission(arrival.mission);
+      const mission = this.store.mission;
+      const driveId = typeof arrival.step.id === "string" ? arrival.step.id : "";
+      const visit = mission ? findStep(mission, driveId) : null;
+      if (!mission || !visit) {
+        this.toast("That Follow route is no longer in the mission.");
+        return;
+      }
+      const listPath: Path = visit.path.slice(0, -1);
+      const list = getList(mission, listPath) ?? [];
+      const start = visit.path[visit.path.length - 1];
+      let at = typeof start === "number" ? start + 1 : list.length;
+      while (at < list.length && list[at]!.type !== STOP_TYPE) at++;
+      const step = stepForChoice(choice, this.store.freshStepId());
+      this.#prepareStep(step);
+      this.store.insertStep(listPath, at, step, `Add ${choice.label.toLowerCase()} at ${to}`);
+      this.#tree.render();
+      this.#tree.reveal(`step:${String(step.id)}`);
+      this.refresh();
+    });
+    // The picker is placed when it opens, so the stand-in anchor is done with.
+    fixed.remove();
+  }
+
+  #addFollowRouteTo(point: string): void {
+    const mission = this.store.mission;
+    if (!mission) {
+      this.toast("Open a mission first.");
+      return;
+    }
+    const step = newStep(STOP_TYPE, this.store.freshStepId());
+    step.to = point;
+    this.store.insertStep(["flow"], -1, step, `Drive to ${point}`);
+    this.toast(`Added a Follow route to ${point} at the end of ${mission.name}'s tasks.`, "info");
+    this.refresh();
+  }
+
+  #addPointDialog(): void {
+    openAddPointDialog({
+      store: this.store,
+      robotPoseUnavailable: () => (this.api.available ? "" : "Connect to a robot to use where it is."),
+      robotPose: async () => {
+        try {
+          const pose = await this.api.robotPose();
+          if (typeof pose?.x === "number" && typeof pose.y === "number") return { x: pose.x, y: pose.y, yaw_deg: typeof pose.yaw_deg === "number" ? pose.yaw_deg : 0 };
+        } catch {
+          /* fall back to the last status */
+        }
+        const robot = this.#status?.robot;
+        return robot && typeof robot.x === "number" ? { x: robot.x, y: robot.y, yaw_deg: robot.yaw_deg ?? 0 } : null;
+      },
+      added: (name) => {
+        this.refresh();
+        this.map.focusPoint(name);
+      },
+    });
+  }
+
+  // ---- import and deploy ----------------------------------------------------
+
+  /** File → Import from robot: fill the project with the robot's maps and missions. */
+  async #importFromRobot(): Promise<void> {
+    if (!this.api.available) {
+      this.toast(this.api.unavailableReason || "The runner cannot be reached.");
+      return;
+    }
+    let sites: SitesDoc;
+    let missions: Mission[];
+    let oldRobot = false;
+    try {
+      const raw = await this.api.project();
+      const parsed = parseProject(JSON.stringify(raw), "What the robot sent");
+      if (!parsed.ok) {
+        this.toast(parsed.error);
+        return;
+      }
+      sites = parsed.doc.sites;
+      missions = parsed.doc.missions;
+    } catch (err) {
+      if (!isMissingEndpoint(err)) {
+        this.toast(this.#reason(err, "The robot's project could not be read"));
+        return;
+      }
+      // An older mission_runner: read the same content one piece at a time.
+      oldRobot = true;
+      try {
+        sites = await this.api.sites();
+        if (!isRecord(sites.maps)) sites.maps = {};
+        sites.schema = SITES_SCHEMA_ID;
+        const list = await this.api.missions();
+        missions = await Promise.all(list.map((m) => this.api.mission(m.name)));
+      } catch (err2) {
+        this.toast(this.#reason(err2, "The robot's maps and missions could not be read"));
+        return;
+      }
+    }
+    const mode = await askImportMode(Object.keys(sites.maps).length, missions.length);
+    if (mode === null) return;
+    const store = this.store;
+    let sentence: string;
+    if (mode === "replace") {
+      store.replaceContent(sites, missions, "Import from robot");
+      sentence = `The project now has the robot's ${missions.length} ${missions.length === 1 ? "mission" : "missions"} and ${Object.keys(sites.maps).length} ${Object.keys(sites.maps).length === 1 ? "map" : "maps"}.`;
+    } else {
+      const merged = mergeContent(store.sitesCopy(), store.missions.map((m) => JSON.parse(JSON.stringify(m)) as Mission), sites, missions);
+      store.replaceContent(merged.sites, merged.missions, "Merge from robot");
+      sentence = merged.summary;
+    }
+    this.#deployedKey = mode === "replace" ? store.robotKey() : null;
+    if (!store.mission && store.missionNames[0]) this.#openMission(store.missionNames[0]);
+    this.refresh();
+    this.map.fit();
+    this.toast(`${sentence}${oldRobot ? " This robot's mission_runner has no /api/project yet, so they were read one by one." : ""} Ctrl+Z undoes the import.`, "info");
+  }
+
+  #openDeploy(): void {
+    if (!this.api.available) {
+      this.toast(this.api.unavailableReason || "The runner cannot be reached.");
+      return;
+    }
+    openDeployDialog({
+      plan: this.#deployPlan(),
+      robotMissions: async () => {
+        try {
+          return (await this.api.missions()).map((m) => m.name);
+        } catch {
+          return null;
+        }
+      },
+      deploy: (replace) => this.#deployProject(replace),
+    });
+  }
+
+  /** Every mission checked the way the robot will check it, before anything is sent. */
+  #deployPlan(): DeployPlan {
+    const store = this.store;
+    const errors: string[] = [];
+    const cautions: string[] = [];
+    const ctx = { ...this.#validateContext(), missions: store.missionNames };
+    for (const mission of store.missions) {
+      const copy = JSON.parse(JSON.stringify(mission)) as Mission;
+      assignIds(copy);
+      const result = validate(copy, ctx);
+      for (const e of result.errors) errors.push(`${mission.name}: ${sentenceCase(e.message)}.`);
+      for (const f of routeFindings(mission, store.points, store.lanes)) cautions.push(`${mission.name}: ${sentenceCase(f.message)}.`);
+    }
+    return { maps: store.mapNames.length, missions: store.missionNames, errors, cautions };
+  }
+
+  async #deployProject(replace: boolean): Promise<boolean> {
+    const store = this.store;
+    const doc = store.toProjectDoc(nowIso());
+    this.#busy = true;
+    this.#syncButtons();
+    try {
+      const result = await this.api.putProject(doc, replace);
+      if (result.ok === false) {
+        this.#reportProjectErrors(result.errors ?? []);
+        return false;
+      }
+      this.#deployedKey = store.robotKey();
+      await this.#refreshMissionList();
+      const saved = result.saved ?? store.missionNames;
+      const deleted = result.deleted ?? [];
+      const parts = [`Deployed ${store.meta.name}: ${saved.length} ${saved.length === 1 ? "mission is" : "missions are"} armed on the robot and the maps are saved.`];
+      if (deleted.length > 0) parts.push(`Deleted from the robot: ${deleted.join(", ")}.`);
+      this.toast(parts.join(" "), "info");
+      for (const w of result.warnings ?? []) this.toast(`Warning${w.mission ? ` in ${w.mission}` : ""}: ${w.message}`, "info");
+      return true;
+    } catch (err) {
+      if (isMissingEndpoint(err)) return await this.#deployPieceByPiece(replace);
+      if (err instanceof MissionApiError && err.errors.length > 0) {
+        this.#reportProjectErrors(err.errors);
+        return false;
+      }
+      this.toast(this.#reason(err, "Deploy failed"));
+      return false;
+    } finally {
+      this.#busy = false;
+      this.refresh();
+    }
+  }
+
+  /**
+   * A mission_runner older than the project contract has no `/api/project`.
+   * The maps and missions still reach it through the endpoints it does have,
+   * one at a time; Replace (and all-or-nothing) needs the newer runner.
+   */
+  async #deployPieceByPiece(replace: boolean): Promise<boolean> {
+    const store = this.store;
+    if (replace) {
+      this.toast("This robot's mission_runner is too old to take a whole project: it has no /api/project, so Replace missions on the robot cannot be done. Update mission_runner on the robot, or deploy without Replace.");
+      return false;
+    }
+    try {
+      const sites = store.sitesCopy();
+      sites.schema = SITES_SCHEMA_ID;
+      await this.api.saveSites(sites);
+      for (const mission of store.missions) {
+        const copy = JSON.parse(JSON.stringify(mission)) as Mission;
+        assignIds(copy);
+        const result = await this.api.saveMission(copy);
+        if (result.ok === false) {
+          this.toast(`The robot rejected ${mission.name}: ${result.errors?.[0]?.message ?? "no reason given"}. The maps and the missions before it were saved.`);
+          return false;
+        }
+      }
+      this.#deployedKey = store.robotKey();
+      await this.#refreshMissionList();
+      this.toast(
+        `Deployed ${store.missions.length} ${store.missions.length === 1 ? "mission" : "missions"} and the maps. This robot's mission_runner is too old for /api/project, so they were sent one at a time; update it for all-or-nothing deploys and Replace.`,
+        "info",
+      );
+      return true;
+    } catch (err) {
+      if (err instanceof MissionApiError) this.#adoptApiFindings(err.errors);
+      this.toast(this.#reason(err, "Deploy failed"));
+      return false;
+    }
+  }
+
+  #reportProjectErrors(errors: readonly ApiFinding[]): void {
+    const first = errors[0];
+    if (!first) {
+      this.toast("The robot refused the project without saying why. Nothing was written.");
+      return;
+    }
+    const more = errors.length > 1 ? ` ${errors.length - 1} more ${errors.length === 2 ? "problem" : "problems"} after that.` : "";
+    this.toast(`The robot refused the project and wrote nothing. ${first.mission ? `In ${first.mission}: ` : ""}${sentenceCase(first.message)}.${more}`);
+    const open = this.store.mission?.name;
+    this.#adoptApiFindings(errors.filter((e) => !e.mission || e.mission === open));
+    this.#tree.render();
   }
 
   // ---- connection ---------------------------------------------------------
@@ -394,7 +843,7 @@ export class App {
     this.#connectBtn.classList.toggle("primary", state === "disconnected");
     if (state === "disconnected") {
       this.#status = null;
-      this.#activity.setUnavailable("Not connected to a robot. The mission can still be edited and exported.");
+      this.#activity.setUnavailable("Not connected to a robot. The project can still be edited, saved and exported.");
       this.#stateEl.textContent = "";
     }
     this.#notice(this.api.unavailableReason);
@@ -405,10 +854,11 @@ export class App {
     this.#notice(this.api.unavailableReason);
     if (available) {
       this.api.startLiveState();
-      void this.#reload();
+      void this.#refreshRobotInfo();
     } else {
-      this.#missions = [];
+      this.#robotMissions = [];
       this.#status = null;
+      this.#deployedKey = null;
       this.#activity.setUnavailable(this.api.unavailableReason || "The runner cannot be reached.");
     }
     this.refresh();
@@ -420,25 +870,18 @@ export class App {
       this.#noticeEl.hidden = true;
       return;
     }
-    this.#noticeEl.replaceChildren(icon("info"), h("span", { text: `${reason} Missions can still be edited and exported here.` }));
+    this.#noticeEl.replaceChildren(icon("info"), h("span", { text: `${reason} The project can still be edited, saved and exported here.` }));
     this.#noticeEl.hidden = false;
   }
 
-  // ---- loading ------------------------------------------------------------
+  // ---- what the robot has ---------------------------------------------------
 
-  async #reload(): Promise<void> {
-    if (!this.api.available) {
-      this.toast(this.api.unavailableReason || "The runner cannot be reached.");
-      return;
-    }
-    try {
-      const [missions, sites] = await Promise.all([this.api.missions(), this.api.sites()]);
-      this.#missions = missions;
-      this.store.setSites(sites);
-      this.map.fit();
-    } catch (err) {
-      this.toast(this.#reason(err, "The list of missions could not be read"));
-    }
+  /**
+   * What the robot has, without touching the project: its mission list (for
+   * Run and for the tree's states), connectors, capabilities and status.
+   */
+  async #refreshRobotInfo(): Promise<void> {
+    await this.#refreshMissionList();
     // These two are advisory: a runner without them still works.
     try {
       this.#connectors = await this.api.connectors();
@@ -457,51 +900,20 @@ export class App {
     } catch {
       /* the live topic will fill it in */
     }
-    const wanted = this.store.mission?.name || this.settings.lastMission;
-    if (wanted && this.#missions.some((m) => m.name === wanted)) await this.#openMission(wanted);
-    this.refresh();
-  }
-
-  async #openMission(name: string): Promise<void> {
-    if (this.store.missionDirty && !confirm("The open mission has changes that are not on the robot yet. Open another one and lose them?")) return;
-    try {
-      const mission = await this.api.mission(name);
-      this.store.setMission(mission);
-      this.settings.lastMission = name;
-      this.#save();
-      this.#tree.reloadExpanded();
-      this.#runState.clear();
-      this.refresh();
-      this.#tree.reveal("mission");
-      // The tree is the editor: give it the keyboard without asking for a click.
-      this.#tree.focus();
-    } catch (err) {
-      this.toast(this.#reason(err, `The mission ${name} could not be read`));
+    const store = this.store;
+    if (store.missions.length === 0 && Object.keys(store.points).length === 0 && this.#robotMissions.length > 0) {
+      this.toast(`Connected. The robot has ${this.#robotMissions.length} ${this.#robotMissions.length === 1 ? "mission" : "missions"}; File → Import from robot brings them into this project.`, "info");
     }
-  }
-
-  #createMission(): void {
-    const name = prompt("What should the mission be called? Lowercase letters, digits, underscore and hyphen.", "new_mission");
-    if (name === null) return;
-    const mission: Mission = { schema: MISSION_SCHEMA_ID, name: name.trim(), title: "", flow: [] };
-    this.store.setMission(mission);
-    this.store.setMissionField("title", name.trim().replace(/[_-]+/g, " "), "Name the mission");
-    this.#tree.reloadExpanded();
     this.refresh();
-    this.#tree.reveal("mission");
-    this.toast("The mission only exists here until you deploy it.", "info");
   }
 
-  async #deleteMission(name: string): Promise<void> {
-    if (!confirm(`Delete the mission ${name} from the robot? Its triggers stop being armed straight away.`)) return;
+  async #refreshMissionList(): Promise<void> {
+    if (!this.api.available) return;
     try {
-      await this.api.deleteMission(name);
-      if (this.store.mission?.name === name) this.store.setMission(null);
-      this.#missions = this.#missions.filter((m) => m.name !== name);
-      this.toast(`${name} was deleted.`, "info");
-      this.refresh();
-    } catch (err) {
-      this.toast(this.#reason(err, `${name} could not be deleted`));
+      this.#robotMissions = await this.api.missions();
+      this.#tree.render();
+    } catch {
+      /* the list stays as it was */
     }
   }
 
@@ -525,8 +937,8 @@ export class App {
 
   /**
    * Make a map the active one on the robot. The runner reads the active map
-   * from `sites.json`, so this is `default_map` plus a `PUT /api/sites`; Nav2
-   * itself is switched by a `Change map` step inside a mission.
+   * from `sites.json`, so this is `default_map` plus a `PUT /api/sites` of the
+   * project's maps; Nav2 itself is switched by a `Change map` step.
    */
   async #changeRobotMap(name: string): Promise<void> {
     if (!this.api.available) {
@@ -538,8 +950,7 @@ export class App {
       const sites: SitesDoc = this.store.sitesCopy();
       sites.schema = SITES_SCHEMA_ID;
       await this.api.saveSites(sites);
-      this.store.markSitesSaved();
-      this.toast(`${name} is the robot's active map now. Nav2 itself is switched by a 'Change map' step in a mission.`, "info");
+      this.toast(`${name} is the robot's active map now, and the robot has the project's maps. Nav2 itself is switched by a 'Change map' step in a mission.`, "info");
     } catch (err) {
       this.toast(this.#reason(err, `${name} could not be made the active map`));
     }
@@ -587,21 +998,22 @@ export class App {
     if (ev.type === "missions.changed") void this.#refreshMissionList();
   }
 
-  async #refreshMissionList(): Promise<void> {
-    try {
-      this.#missions = await this.api.missions();
-      this.#tree.render();
-    } catch {
-      /* the list stays as it was */
-    }
-  }
-
-  // ---- run, pause, stop, deploy -------------------------------------------
+  // ---- run, pause, stop ---------------------------------------------------
 
   async #run(): Promise<void> {
     const mission = this.store.mission;
     if (!mission) return;
-    if (this.store.missionDirty && !confirm("This mission has changes that are not on the robot. Run the version the robot already has?")) return;
+    if (!this.#robotMissions.some((m) => m.name === mission.name)) {
+      this.toast(`${mission.name} is not on the robot yet. Deploy the project first.`);
+      return;
+    }
+    if (this.#deployedKey !== this.store.robotKey()) {
+      const sentence =
+        this.#deployedKey === null
+          ? "The robot may not have the latest version of this project. Run the version the robot already has?"
+          : "The project has changes the robot does not have yet. Run the version the robot already has?";
+      if (!confirm(sentence)) return;
+    }
     try {
       const result = await this.api.run(mission.name);
       if (result.accepted === false) this.toast(`The robot did not start it: ${result.reason ?? "no reason given"}.`);
@@ -634,67 +1046,6 @@ export class App {
     }
   }
 
-  /** Validate, then write the mission and the map data in one action. */
-  async #deploy(): Promise<void> {
-    const mission = this.store.missionCopy();
-    if (!mission) return;
-    assignIds(mission);
-    const local = validate(mission, {
-      sites: this.store.sites,
-      activeMap: this.store.mapName,
-      missions: this.#missions.map((m) => m.name),
-      connectors: Object.keys(this.#connectors).length > 0 ? Object.keys(this.#connectors) : null,
-      capabilities: this.#capabilities,
-    });
-    if (local.errors.length > 0) {
-      this.toast(`${local.errors.length} ${local.errors.length === 1 ? "problem has" : "problems have"} to be fixed first. The first one: ${local.errors[0]!.message}.`);
-      this.#findings = [...local.errors, ...local.warnings];
-      this.#tree.render();
-      return;
-    }
-    this.#busy = true;
-    this.#syncButtons();
-    try {
-      const missionDirty = this.store.missionDirty;
-      const sitesDirty = this.store.sitesDirty;
-      if (missionDirty) {
-        const result = await this.api.saveMission(mission);
-        if (result.ok === false) {
-          this.#adoptApiFindings(result.errors ?? []);
-          this.#tree.render();
-          this.toast(`The robot rejected the mission: ${result.errors?.[0]?.message ?? "no reason given"}.`);
-          return;
-        }
-        // Give the document back its generated ids and the new version.
-        const current = this.store.mission;
-        if (current) {
-          assignIds(current);
-          if (typeof result.version === "number") current.version = result.version;
-        }
-        this.store.markMissionSaved();
-        for (const w of result.warnings ?? []) this.toast(`Warning: ${w.message}`, "info");
-      }
-      if (sitesDirty) {
-        const sites: SitesDoc = this.store.sitesCopy();
-        sites.schema = SITES_SCHEMA_ID;
-        await this.api.saveSites(sites);
-        this.store.markSitesSaved();
-      }
-      await this.#refreshMissionList();
-      const said = [missionDirty ? `${mission.name} is armed on the robot.` : "", sitesDirty ? "The map data is saved." : ""].filter((s) => s !== "");
-      this.toast(`Deployed. ${said.join(" ")}`, "info");
-    } catch (err) {
-      if (err instanceof MissionApiError) this.#adoptApiFindings(err.errors);
-      this.toast(this.#reason(err, "Deploy failed"));
-    } finally {
-      this.#busy = false;
-      this.#syncButtons();
-      this.#tree.render();
-      if (this.settings.rightTab === "maps") this.#maps.render();
-      else this.#props.render();
-    }
-  }
-
   // ---- export -------------------------------------------------------------
 
   #exportPython(): void {
@@ -704,7 +1055,8 @@ export class App {
       return;
     }
     assignIds(mission);
-    showExport("Export as a Python script", exportPython(mission, this.store.sites, this.store.mapName));
+    const ctx = this.formContext();
+    showExport("Export as a Python script", exportPython(mission, this.store.sites, this.store.mapName, { requestTopic: ctx.requestTopic, answerTopic: ctx.answerTopic }));
   }
 
   #exportBt(): void {
@@ -722,20 +1074,35 @@ export class App {
   #onKey(ev: KeyboardEvent): void {
     const target = ev.target as HTMLElement | null;
     const typing = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement;
-    if (ev.ctrlKey && (ev.key === "z" || ev.key === "Z")) {
-      ev.preventDefault();
-      this.#undo();
-      return;
-    }
-    if (ev.ctrlKey && (ev.key === "y" || ev.key === "Y")) {
-      ev.preventDefault();
-      this.#redo();
-      return;
-    }
-    if (ev.ctrlKey && (ev.key === "s" || ev.key === "S")) {
-      ev.preventDefault();
-      void this.#deploy();
-      return;
+    const key = ev.key.toLowerCase();
+    if (ev.ctrlKey && !ev.altKey) {
+      if (key === "s") {
+        ev.preventDefault();
+        // Leave a field first, so a value still being typed is part of what is saved.
+        if (typing) target.blur();
+        void (ev.shiftKey ? this.session.saveAs() : this.session.save());
+        return;
+      }
+      if (key === "o") {
+        ev.preventDefault();
+        void this.session.open();
+        return;
+      }
+      if (key === "n") {
+        ev.preventDefault();
+        void this.session.newProject();
+        return;
+      }
+      if (key === "z" && !typing) {
+        ev.preventDefault();
+        this.#undo();
+        return;
+      }
+      if (key === "y" && !typing) {
+        ev.preventDefault();
+        this.#redo();
+        return;
+      }
     }
     if (typing) return;
     // The tree owns the arrows while it has focus; the map owns the tool keys.
@@ -750,14 +1117,38 @@ export class App {
     if (this.store.redo()) this.refresh();
   }
 
+  /** Closing the window with unsaved changes asks first. */
+  async #guardWindowClose(): Promise<void> {
+    if (isDesktop()) {
+      try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        await getCurrentWindow().onCloseRequested(async (event) => {
+          if (!this.session.dirty) return;
+          if (!(await this.session.confirmDiscard("closing Mission Builder"))) event.preventDefault();
+        });
+      } catch {
+        /* without the window API the close is not guarded; the autosave still is */
+      }
+      return;
+    }
+    window.addEventListener("beforeunload", (event) => {
+      if (!this.session.dirty) return;
+      void this.session.autosaveNow();
+      event.preventDefault();
+    });
+  }
+
   // ---- helpers ------------------------------------------------------------
 
   formContext(): FormContext {
+    const s = this.store.meta.settings;
     return {
       siteNames: Object.keys(this.store.points),
       mapNames: this.store.mapNames,
       connectorNames: Object.keys(this.#connectors),
-      missionNames: this.#missions.map((m) => m.name),
+      missionNames: this.#knownMissionNames(),
+      requestTopic: typeof s.request_topic === "string" && s.request_topic !== "" ? s.request_topic : DEFAULT_REQUEST_TOPIC,
+      answerTopic: typeof s.answer_topic === "string" && s.answer_topic !== "" ? s.answer_topic : DEFAULT_ANSWER_TOPIC,
     };
   }
 
@@ -799,7 +1190,7 @@ export class App {
     this.#lastToast.set(message, now);
     const el = h("div", { class: `toast ${kind}`, text: message });
     this.#toastsEl.appendChild(el);
-    setTimeout(() => el.remove(), kind === "info" ? 4000 : 7000);
+    setTimeout(() => el.remove(), kind === "info" ? 5000 : 8000);
   }
 
   #save(): void {
@@ -871,6 +1262,8 @@ export class App {
   }
 }
 
+// ---- module helpers ------------------------------------------------------------
+
 /** The site a step drives to, when it names one. */
 function siteOfStep(step: { type: string; [k: string]: unknown }): string | null {
   if (step.type === "nav.follow_route") return typeof step.to === "string" && step.to !== "" ? step.to : null;
@@ -879,4 +1272,102 @@ function siteOfStep(step: { type: string; [k: string]: unknown }): string | null
     if (ref) return ref;
   }
   return null;
+}
+
+/**
+ * The Follow routes of a mission the graph cannot drive, as findings on their
+ * steps: red when the run would fail, a warning when `on_no_route: direct`
+ * drives straight instead. A destination that is not a point at all is left
+ * to the validator, which already says so.
+ */
+function routeFindings(mission: Mission, points: Record<string, Site>, lanes: readonly Edge[]): Finding[] {
+  const stops: Stop[] = [];
+  const paths = new Map<Step, Path>();
+  for (const visit of walkSteps(mission)) {
+    if (visit.step.type !== STOP_TYPE) continue;
+    stops.push({ step: visit.step, actions: [] });
+    paths.set(visit.step, visit.path);
+  }
+  const out: Finding[] = [];
+  for (const leg of planRoute(stops, points, lanes, mission)) {
+    if (leg.problem === "" || leg.route.length === 0) continue;
+    const step = stops[leg.stopIndex]!.step;
+    const message = `${stepTitle(step)}: ${leg.problem.replace(/\.$/, "")}${leg.direct ? ", so it drives straight there" : ""}`;
+    const finding: Finding = { level: leg.direct ? "warning" : "error", path: paths.get(step) ?? [], message };
+    if (typeof step.id === "string") finding.stepId = step.id;
+    out.push(finding);
+  }
+  return out;
+}
+
+/**
+ * Merge what a robot has into the project: maps, points, lanes and missions
+ * the project lacks are added; everything the project already has is kept.
+ */
+function mergeContent(sites: SitesDoc, missions: Mission[], robotSites: SitesDoc, robotMissions: Mission[]): { sites: SitesDoc; missions: Mission[]; summary: string } {
+  let maps = 0;
+  let points = 0;
+  let lanes = 0;
+  for (const [name, robotMap] of Object.entries(robotSites.maps ?? {})) {
+    const own = sites.maps[name];
+    if (!own) {
+      sites.maps[name] = robotMap;
+      maps++;
+      continue;
+    }
+    own.sites ??= {};
+    for (const [p, site] of Object.entries(robotMap.sites ?? {})) {
+      if (own.sites[p]) continue;
+      own.sites[p] = site;
+      points++;
+    }
+    own.edges ??= [];
+    for (const e of robotMap.edges ?? []) {
+      if (own.edges.some((o) => (o.from === e.from && o.to === e.to) || (o.from === e.to && o.to === e.from))) continue;
+      own.edges.push(e);
+      lanes++;
+    }
+    for (const [z, zone] of Object.entries(robotMap.zones ?? {})) {
+      own.zones ??= {};
+      if (!own.zones[z]) own.zones[z] = zone;
+    }
+  }
+  if (!sites.default_map && robotSites.default_map) sites.default_map = robotSites.default_map;
+  const added: string[] = [];
+  let kept = 0;
+  for (const m of robotMissions) {
+    if (missions.some((o) => o.name === m.name)) {
+      kept++;
+      continue;
+    }
+    missions.push(m);
+    added.push(m.name);
+  }
+  const bits: string[] = [];
+  if (maps > 0) bits.push(`${maps} ${maps === 1 ? "map" : "maps"}`);
+  if (points > 0) bits.push(`${points} ${points === 1 ? "point" : "points"}`);
+  if (lanes > 0) bits.push(`${lanes} ${lanes === 1 ? "lane" : "lanes"}`);
+  if (added.length > 0) bits.push(`${added.length} ${added.length === 1 ? "mission" : "missions"} (${added.join(", ")})`);
+  const summary =
+    (bits.length === 0 ? "The project already had everything the robot has." : `Merged in from the robot: ${bits.join(", ")}.`) +
+    (kept > 0 ? ` ${kept} ${kept === 1 ? "mission was" : "missions were"} in both, and the project's version was kept.` : "");
+  return { sites, missions, summary };
+}
+
+function sentenceCase(text: string): string {
+  const t = text.trim().replace(/\.$/, "");
+  return t.charAt(0).toUpperCase() + t.slice(1);
+}
+
+function uniqueName(taken: readonly string[], base: string): string {
+  if (!taken.includes(base)) return base;
+  for (let i = 2; ; i++) if (!taken.includes(`${base}_${i}`)) return `${base}_${i}`;
+}
+
+/** The folder of a path, shortened for a menu hint. */
+function shortDir(path: string): string {
+  const parts = path.split(/[\\/]/);
+  parts.pop();
+  const dir = parts.join("\\");
+  return dir.length > 34 ? `…${dir.slice(-33)}` : dir;
 }
