@@ -152,7 +152,14 @@ function checkParam(c: Collector, def: ParamDef, value: unknown, path: Path, sid
       if (!Array.isArray(value)) bad("must be a list of steps");
       return;
     case "options":
+      if (def.allowEmpty) {
+        if (!Array.isArray(value) || !value.every((o) => typeof o === "string")) bad("must be a list of text answers");
+        return;
+      }
       if (!Array.isArray(value) || value.length === 0 || !value.every((o) => typeof o === "string")) bad("must be a list of at least one text option");
+      return;
+    case "sites":
+      if (!Array.isArray(value) || !value.every((o) => typeof o === "string" && o !== "")) bad("must be a list of point names");
       return;
     case "behavior_tree":
       if (typeof value === "string") {
@@ -291,6 +298,18 @@ function checkStep(w: WalkCtx, step: Record<string, unknown>, path: Path, inLoop
     const opts = Array.isArray(step.options) ? step.options.map(String) : ["Continue", "Stop"];
     if (typeof step.default === "string" && !opts.includes(step.default)) c.err([...path, "default"], `default '${step.default}' is not one of the options`, sid);
     if (step.timeout_s === undefined && w.unattended) c.warn(path, "ask_user without a timeout can block an unattended robot forever", sid);
+  }
+  if (type === "ros.request") {
+    const opts = Array.isArray(step.options) ? step.options.map(String) : [];
+    if (typeof step.default === "string" && opts.length > 0 && !opts.includes(step.default)) c.warn([...path, "default"], `the default answer '${step.default}' is not one of the answers; the robot accepts it but logs a warning`, sid);
+    if (step.on_timeout !== "fail" && step.timeout_s !== undefined && (typeof step.default !== "string" || step.default === "")) c.warn([...path, "default"], "there is no default answer, so the step fails when nobody answers in time", sid);
+    for (const key of ["request_topic", "answer_topic"]) {
+      const topic = step[key];
+      if (topic === undefined || topic === "") continue;
+      if (typeof topic !== "string" || !/^[/$]/.test(topic)) c.err([...path, key], `${key === "request_topic" ? "the request topic" : "the answer topic"} must start with / (or be an expression)`, sid);
+    }
+    if (step.request_topic !== undefined && step.request_topic === step.answer_topic) c.err([...path, "answer_topic"], "the request and the answer need two different topics", sid);
+    if (step.timeout_s === undefined && w.unattended) c.warn(path, "a request without a timeout can block an unattended robot forever", sid);
   }
   if (type === "run_mission" && typeof step.mission === "string") {
     if (step.mission === w.mission.name) c.err([...path, "mission"], "a mission cannot run itself", sid);

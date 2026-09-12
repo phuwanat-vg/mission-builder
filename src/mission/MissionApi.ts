@@ -90,6 +90,25 @@ export interface RunnerStatus {
 export interface ApiFinding {
   path?: Path;
   message: string;
+  /** `PUT /api/project`: the mission a finding belongs to. */
+  mission?: string;
+}
+
+/** `PUT /api/project`. */
+export interface ProjectDeployResult {
+  ok: boolean;
+  saved?: string[];
+  deleted?: string[];
+  warnings?: ApiFinding[];
+  errors?: ApiFinding[];
+}
+
+/**
+ * True when the runner answered that it has no such endpoint, which is how an
+ * older mission_runner says it does not know `/api/project` yet.
+ */
+export function isMissingEndpoint(err: unknown): boolean {
+  return err instanceof MissionApiError && (err.status === 404 || err.status === 405 || err.status === 501);
 }
 
 export interface MissionSummary {
@@ -332,6 +351,18 @@ export class MissionApi {
   }
   async saveSites(doc: SitesDoc): Promise<unknown> {
     return await this.put<unknown>("/api/sites", doc);
+  }
+  /** The robot's sites and missions as one `project/1` document. */
+  async project(): Promise<unknown> {
+    return await this.get<unknown>("/api/project");
+  }
+  /**
+   * Import a `project/1` document: the runner validates everything first and
+   * writes nothing if a mission is invalid. `replace` also deletes robot
+   * missions the project does not have.
+   */
+  async putProject(doc: unknown, replace: boolean): Promise<ProjectDeployResult> {
+    return await this.put<ProjectDeployResult>(`/api/project?replace=${replace ? "true" : "false"}`, doc);
   }
   async robotPose(): Promise<{ x: number; y: number; yaw_deg: number; frame?: string }> {
     return await this.get("/api/robot/pose");

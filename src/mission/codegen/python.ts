@@ -15,6 +15,9 @@ export interface PythonOptions {
   activeMap?: string | null;
   /** File name shown in the docstring (defaults to `<name>.json`). */
   fileName?: string;
+  /** The project's request and answer topics, used where a step names none. */
+  requestTopic?: string;
+  answerTopic?: string;
 }
 
 const REF_RE = /^\$([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[0-9]+\])*)$/;
@@ -78,6 +81,10 @@ interface Gen {
   usesMqtt: boolean;
   usesRos: boolean;
   usesRosService: boolean;
+  usesRoute: boolean;
+  usesRequest: boolean;
+  requestTopic: string;
+  answerTopic: string;
   todo: number;
 }
 
@@ -119,6 +126,34 @@ function emitAction(g: Gen, step: Step): Emitted {
       }
       L.push("ok = wait_task(nav)");
       return out(true);
+    }
+    case "nav.follow_route": {
+      g.usesRoute = true;
+      const through = Array.isArray(step.through) ? pyValue(step.through) : "[]";
+      const start = typeof step.from === "string" && step.from !== "" ? pyValue(step.from) : "None";
+      const onNoRoute = step.on_no_route === "direct" ? "direct" : "fail";
+      L.push(`value = follow_route(nav, ${pyValue(step.to ?? "")}, ${through}, ${start}, ${JSON.stringify(onNoRoute)}, ctx)`);
+      L.push("ok = value is not None");
+      return out(true, true);
+    }
+    case "ros.request": {
+      g.usesRequest = true;
+      const timeout = typeof step.timeout_s === "number" ? String(step.timeout_s) : "None";
+      const args = [
+        pyValue(step.text ?? ""),
+        pyValue(Array.isArray(step.options) ? step.options : []),
+        `default=${step.default !== undefined && step.default !== "" ? pyValue(step.default) : "None"}`,
+        `timeout_s=${timeout}`,
+        `on_timeout=${JSON.stringify(step.on_timeout === "fail" ? "fail" : "default")}`,
+        `request_topic=${pyValue(typeof step.request_topic === "string" && step.request_topic !== "" ? step.request_topic : g.requestTopic)}`,
+        `answer_topic=${pyValue(typeof step.answer_topic === "string" && step.answer_topic !== "" ? step.answer_topic : g.answerTopic)}`,
+        `station=${typeof step.station === "string" && step.station !== "" ? pyValue(step.station) : 'ctx.get("_last_site")'}`,
+        `data=${step.data !== undefined ? pyValue(step.data) : "None"}`,
+        `step_id=${JSON.stringify(String(step.id ?? ""))}`,
+      ];
+      L.push(`value = ros_request(nav, ${args.join(", ")})`);
+      L.push("ok = value is not None");
+      return out(true, true);
     }
     case "nav.follow_waypoints":
       L.push(`nav.followWaypoints(${posesExpr(step.poses)})`);
@@ -587,6 +622,150 @@ def ros_publish(nav, topic, msg_type, fields):
     nav.destroy_publisher(pub)
 `;
 
+const ROUTE_HELPERS = `
+
+def plan_route(start, goal):
+    """Cheapest chain of sites from start to goal along the lanes, like
+    mission_runner: Dijkstra over lane length x cost, one-way lanes only from
+    -> to, blocked lanes left out. None when the graph has no path."""
+    if start == goal:
+        return [start] if start in SITES else None
+    if start not in SITES or goal not in SITES:
+        return None
+    adj = {}
+    for a, b, both, blocked, cost in EDGES:
+        if blocked or a == b or a not in SITES or b not in SITES:
+            continue
+        length = math.hypot(SITES[b][0] - SITES[a][0], SITES[b][1] - SITES[a][1]) * max(0.01, cost)
+        adj.setdefault(a, []).append((b, length))
+        if both:
+            adj.setdefault(b, []).append((a, length))
+    dist, prev, done, todo = {start: 0.0}, {}, set(), [(0.0, start)]
+    while todo:
+        todo.sort()
+        d, node = todo.pop(0)
+        if node in done:
+            continue
+        done.add(node)
+        if node == goal:
+            break
+        for nxt, length in adj.get(node, ()):
+            if nxt not in done and d + length < dist.get(nxt, math.inf):
+                dist[nxt] = d + length
+                prev[nxt] = node
+                todo.append((d + length, nxt))
+    if goal not in prev:
+        return None
+    chain = [goal]
+    while chain[-1] != start:
+        chain.append(prev[chain[-1]])
+    return chain[::-1]
+
+
+def nearest_graph_site(x, y):
+    """The site nearest (x, y) that a lane can be driven from."""
+    on_graph = set()
+    for a, b, both, blocked, _cost in EDGES:
+        if not blocked:
+            on_graph.add(a)
+            if both:
+                on_graph.add(b)
+    names = [n for n in SITES if n in on_graph] or list(SITES)
+    return min(names, key=lambda n: math.hypot(SITES[n][0] - x, SITES[n][1] - y), default=None)
+
+
+def follow_route(nav, to, through, start, on_no_route, ctx):
+    """nav.follow_route: plan start -> through... -> to on the lanes and send only
+    waypoints that lie on them, with goThroughPoses."""
+    to = str(val(to, ctx))
+    through = [str(val(t, ctx)) for t in (val(through, ctx) or [])]
+    for name in [*through, to]:
+        if name not in SITES:
+            print(f"site '{name}' is not on the map", file=sys.stderr)
+            return None
+    if start is None:
+        robot = robot_pose(nav)
+        if robot is None:
+            print("robot pose unknown; cannot find the nearest route node", file=sys.stderr)
+            return None
+        start = nearest_graph_site(robot.pose.position.x, robot.pose.position.y)
+    start = str(val(start, ctx))
+    chain = [start]
+    for a, b in zip([start, *through], [*through, to]):
+        leg = plan_route(a, b)
+        if leg is None:
+            if on_no_route != "direct":
+                print(f"no route from '{a}' to '{b}' on this map's lanes", file=sys.stderr)
+                return None
+            print(f"no route from '{a}' to '{b}'; driving direct", file=sys.stderr)
+            leg = [a, b]
+        chain.extend(leg[1:])
+    poses = [site(nav, n) for n in chain[1:]] or [site(nav, to)]
+    if len(poses) == 1:
+        nav.goToPose(poses[0])
+    else:
+        nav.goThroughPoses(poses)
+    if not wait_task(nav):
+        return None
+    ctx["_last_site"] = to
+    return {"route": chain, "from": start, "to": to, "through": through}
+`;
+
+const REQUEST_HELPERS = `
+
+def ros_request(nav, text, options, default=None, timeout_s=None, on_timeout="default",
+                request_topic="/iviz/request", answer_topic="/iviz/answer", station=None, data=None, step_id=""):
+    """ros.request: publish a JSON request on request_topic and wait for the answer
+    with the same id on answer_topic (both std_msgs/String). iViz's Dashboard
+    answers this exchange, and so can any node that echoes the id back."""
+    rid = uuid.uuid4().hex[:8]
+    answers = []
+
+    def on_answer(msg):
+        try:
+            body = json.loads(msg.data)
+        except ValueError:
+            return
+        if isinstance(body, dict) and str(body.get("id")) == rid and not answers:
+            answers.append(body)
+
+    # Listen before publishing, so a fast answerer cannot beat us.
+    sub = nav.create_subscription(String, answer_topic, on_answer, 10)
+    pub = nav.create_publisher(String, request_topic, 10)
+    request = {"id": rid, "text": str(text), "options": [str(o) for o in (options or [])], "source": "mission_builder_export", "mission": MISSION, "step_id": step_id}
+    if default is not None:
+        request["default"] = str(default)
+    if timeout_s:
+        request["timeout_s"] = timeout_s
+    if station:
+        request["station"] = str(station)
+    if data is not None:
+        request["data"] = data
+    try:
+        deadline = time.time() + 0.5
+        while time.time() < deadline:  # let the answering side match the publisher
+            rclpy.spin_once(nav, timeout_sec=0.05)
+        pub.publish(String(data=json.dumps(request, default=str)))
+        print(f"asked on {request_topic}: {request['text']} ({rid})")
+        deadline = time.time() + float(timeout_s) if timeout_s else None
+        while not answers:
+            if deadline is not None and time.time() >= deadline:
+                if on_timeout == "default" and default is not None:
+                    print(f"no answer within {timeout_s} s; using '{default}'", file=sys.stderr)
+                    return {"id": rid, "answer": str(default), "by": "timeout", "timed_out": True}
+                print(f"no answer on {answer_topic} within {timeout_s} s", file=sys.stderr)
+                return None
+            rclpy.spin_once(nav, timeout_sec=0.1)
+    finally:
+        nav.destroy_subscription(sub)
+        nav.destroy_publisher(pub)
+    body = answers[0]
+    answer = body.get("answer")
+    if options and str(answer) not in [str(o) for o in options]:
+        print(f"answer '{answer}' is not one of {options}", file=sys.stderr)
+    return {"id": rid, "answer": answer, "by": body.get("by", ""), "timed_out": False}
+`;
+
 const ROS_SERVICE_HELPERS = `
 
 def ros_call_service(nav, service, srv_type, fields, timeout=5.0):
@@ -607,7 +786,17 @@ def ros_call_service(nav, service, srv_type, fields, timeout=5.0):
 `;
 
 export function generatePython(mission: Mission, opts: PythonOptions = {}): string {
-  const g: Gen = { mission, usesMqtt: false, usesRos: false, usesRosService: false, todo: 0 };
+  const g: Gen = {
+    mission,
+    usesMqtt: false,
+    usesRos: false,
+    usesRosService: false,
+    usesRoute: false,
+    usesRequest: false,
+    requestTopic: opts.requestTopic || "/iviz/request",
+    answerTopic: opts.answerTopic || "/iviz/answer",
+    todo: 0,
+  };
   const name = mission.name;
   const version = mission.version ?? 1;
   const fileName = opts.fileName ?? `${name}.json`;
@@ -624,6 +813,12 @@ export function generatePython(mission: Mission, opts: PythonOptions = {}): stri
   }
   const mapEntries: string[] = [];
   if (sites) for (const [n, m] of Object.entries(sites.maps)) if (m.file) mapEntries.push(`    ${JSON.stringify(n)}: ${JSON.stringify(m.file)},`);
+  const edgeEntries: string[] = [];
+  if (sites && activeMap && sites.maps[activeMap]) {
+    for (const e of sites.maps[activeMap]!.edges ?? []) {
+      edgeEntries.push(`    (${JSON.stringify(e.from)}, ${JSON.stringify(e.to)}, ${e.bidirectional === false ? "False" : "True"}, ${e.blocked === true ? "True" : "False"}, ${typeof e.cost === "number" ? e.cost : 1}),`);
+    }
+  }
 
   const ctxInit: string[] = [];
   for (const [k, inp] of Object.entries(mission.inputs ?? {})) ctxInit.push(`${JSON.stringify(k)}: ${pyLit(inp.default ?? null)}`);
@@ -631,6 +826,10 @@ export function generatePython(mission: Mission, opts: PythonOptions = {}): stri
 
   const imports = ["import json, math, os, re, sys, time", "import rclpy", "from geometry_msgs.msg import PoseStamped", "from nav_msgs.msg import Path", "from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult"];
   if (g.usesMqtt) imports.push("import paho.mqtt.client as mqtt");
+  if (g.usesRequest) {
+    imports.push("import uuid");
+    imports.push("from std_msgs.msg import String");
+  }
   if (g.usesRos) {
     imports.push(g.usesRosService ? "from rosidl_runtime_py.utilities import get_message, get_service" : "from rosidl_runtime_py.utilities import get_message");
     imports.push("from rosidl_runtime_py.set_message import set_message_fields");
@@ -645,7 +844,10 @@ export function generatePython(mission: Mission, opts: PythonOptions = {}): stri
   parts.push(`CURRENT_MAP = ${activeMap ? JSON.stringify(activeMap) : "None"}`);
   parts.push(`SITES = {${siteEntries.length ? `\n${siteEntries.join("\n")}\n` : ""}}  # from the active map${activeMap ? ` '${activeMap}'` : ""}`);
   parts.push(`MAPS = {${mapEntries.length ? `\n${mapEntries.join("\n")}\n` : ""}}  # map name -> yaml on the robot`);
+  if (g.usesRoute) parts.push(`EDGES = [${edgeEntries.length ? `\n${edgeEntries.join("\n")}\n` : ""}]  # lanes of the active map: (from, to, two-way, blocked, cost)`);
   parts.push(HELPERS.trimEnd());
+  if (g.usesRoute) parts.push(ROUTE_HELPERS.trimEnd());
+  if (g.usesRequest) parts.push(REQUEST_HELPERS.trimEnd());
   if (g.usesMqtt) parts.push(MQTT_HELPERS.trimEnd());
   if (g.usesRos) parts.push(ROS_HELPERS.trimEnd());
   if (g.usesRosService) parts.push(ROS_SERVICE_HELPERS.trimEnd());

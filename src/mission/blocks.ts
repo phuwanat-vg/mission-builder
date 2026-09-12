@@ -25,6 +25,8 @@ export type ParamKind =
   | "poses"
   | "points"
   | "site"
+  /** An ordered list of site names (`through`). */
+  | "sites"
   | "map"
   | "connector"
   | "json"
@@ -48,6 +50,8 @@ export interface ParamDef {
   placeholder?: string;
   /** number/integer: a `$ref` / `${expr}` string is also accepted (schema `numberOrExpr`). */
   allowExpr?: boolean;
+  /** options: an empty list is allowed (a free-form answer). */
+  allowEmpty?: boolean;
 }
 
 export type BlockGroup = "Navigate" | "Behaviors" | "Map & costmap" | "Logic" | "Wait & ask" | "ROS" | "Connectors";
@@ -173,16 +177,20 @@ const BLOCKS: BlockDef[] = [
     summary: (s) => summarize(s, posesText(s.poses)),
   },
   {
-    type: "nav.follow_route", label: "Drive to stop", group: "Navigate", icon: "route",
-    help: "Drive to a site along the lanes drawn in the route graph. This is what a stop compiles to.",
+    type: "nav.follow_route", label: "Follow route", group: "Navigate", icon: "route",
+    help: "Drive to a point along the lanes drawn on the map. The robot is only given waypoints that lie on the lanes, and one-way and blocked lanes are respected.",
     params: [
       { key: "to", label: "To", kind: "site", required: true, help: "Destination site, or an expression that resolves to one." },
+      { key: "through", label: "Pass through", kind: "sites", help: "Points visited in order before the destination; every leg is planned on the lanes." },
       { key: "from", label: "From", kind: "site", help: "Start site. Defaults to the graph node nearest the robot.", advanced: true },
       { key: "on_no_route", label: "When there is no route", kind: "select", options: ["fail", "direct"], default: "fail", advanced: true },
       { key: "apply_speed_limits", label: "Apply lane speed limits", kind: "boolean", default: false, advanced: true },
       BT_PARAM,
     ],
-    summary: (s) => summarize(s, typeof s.to === "string" && s.to !== "" ? s.to : "(no destination)"),
+    summary: (s) => {
+      const via = Array.isArray(s.through) ? s.through.filter((v): v is string => typeof v === "string" && v !== "") : [];
+      return summarize(s, typeof s.to === "string" && s.to !== "" ? s.to : "(no destination)", via.length > 0 ? `via ${via.join(", ")}` : undefined);
+    },
   },
   {
     type: "nav.follow_waypoints", label: "Follow waypoints", group: "Navigate", icon: "waypoints",
@@ -397,6 +405,24 @@ const BLOCKS: BlockDef[] = [
       { key: "default", label: "Default", kind: "string", help: "Chosen automatically when nobody answers before the timeout." },
     ],
     summary: (s) => summarize(s, valueText(s.text), Array.isArray(s.options) ? `[${s.options.map(String).join(" / ")}]` : undefined),
+  },
+  {
+    type: "ros.request", label: "Ask for an answer", group: "Wait & ask", icon: "message",
+    help: "Publish a request on a topic and wait for its answer on another, both std_msgs/String carrying JSON. iViz's Dashboard answers it, and so can any node that echoes the id back with an answer.",
+    params: [
+      { key: "text", label: "Question", kind: "text", required: true, placeholder: "Is the part in place?" },
+      { key: "options", label: "Answers", kind: "options", allowEmpty: true, help: "Leave empty to accept any answer." },
+      { key: "default", label: "Default answer", kind: "string", help: "Used when nobody answers in time and 'When nobody answers' is 'default'." },
+      { key: "on_timeout", label: "When nobody answers", kind: "select", options: ["default", "fail"], default: "default" },
+      { key: "station", label: "Station", kind: "site", help: "Where the robot is. Defaults to the destination of the last Follow route." },
+      { key: "request_topic", label: "Request topic", kind: "string", placeholder: "/iviz/request" },
+      { key: "answer_topic", label: "Answer topic", kind: "string", placeholder: "/iviz/answer" },
+      { key: "data", label: "Extra data", kind: "json", help: "Extra JSON for the answering node; values may use expressions." },
+    ],
+    summary: (s) => {
+      const opts = Array.isArray(s.options) && s.options.length > 0 ? `[${s.options.map(String).join(" / ")}]` : "any answer";
+      return summarize(s, valueText(s.text), opts, typeof s.out === "string" ? `→ ${s.out}` : undefined);
+    },
   },
   // ROS
   {
@@ -685,6 +711,13 @@ export function newStep(type: string, id: string): Step {
   if (def) {
     for (const p of def.params) if (p.required) step[p.key] = kindDefault(p);
     if (type === "nav.follow_path") step.points = [];
+    if (type === "ros.request") {
+      // The example of the contract: a working request out of the box.
+      step.options = ["OK", "Reject"];
+      step.default = "OK";
+      step.timeout_s = 120;
+      step.on_timeout = "default";
+    }
   }
   return step;
 }
@@ -728,8 +761,10 @@ export const POSE_PARAMS: Readonly<Record<string, readonly string[]>> = {
   "nav.go_to_pose": ["pose"],
   "nav.compute_path": ["goal", "start"],
   "nav.dock": ["dock_pose"],
+  "ros.request": ["station"],
 };
 export const POSE_LIST_PARAMS: Readonly<Record<string, readonly string[]>> = {
+  "nav.follow_route": ["through"],
   "nav.go_through_poses": ["poses"],
   "nav.follow_waypoints": ["poses"],
   "nav.follow_path": ["points"],

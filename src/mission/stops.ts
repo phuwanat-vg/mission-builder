@@ -11,8 +11,9 @@
  * step ids and unknown fields survive.
  */
 
-import type { Mission, Site, Step } from "./types";
+import type { Mission, Path, Site, Step } from "./types";
 import type { Edge } from "./types";
+import { getList, walkSteps } from "./ids";
 import { routeThroughGraph } from "./geometry";
 import { hasExpression } from "./expressions";
 
@@ -156,38 +157,133 @@ export function stopLabel(stop: Stop): string {
 }
 
 export interface PlannedLeg {
-  /** Site names along the lanes, from the previous stop to this one. */
+  /**
+   * Site names the robot passes, in order: from where it starts (when that is
+   * known before running) through every `through` site to the destination.
+   * A hop the graph cannot drive is kept as a straight hop and named in
+   * `problem`.
+   */
   route: string[];
   /** Index of the stop this leg arrives at. */
   stopIndex: number;
-  /** Set when the graph has no path; the mission cannot drive it. */
+  /** A sentence when some hop has no route on the graph; "" when it drives. */
   problem: string;
+  /** Where the chain starts: a site, or null when it is the point nearest the robot. */
+  start: string | null;
+  /** `on_no_route: direct`: a missing route is driven straight instead of failing. */
+  direct: boolean;
+  /** Length of the planned chain in metres. */
+  lengthM: number;
+}
+
+/** Static site names of a `through` list; expressions are left out. */
+export function throughSites(step: Step): string[] {
+  const list = step.through;
+  if (!Array.isArray(list)) return [];
+  return list.filter((v): v is string => typeof v === "string" && v !== "" && !hasExpression(v));
+}
+
+/** Why the graph has no route from `a` to `b`, as a sentence. */
+export function noRouteSentence(sites: Record<string, Site>, edges: readonly Edge[], a: string, b: string): string {
+  if (routeThroughGraph(sites, edges, a, b, true)) return `There is no route from ${a} to ${b}: every way there uses a blocked lane.`;
+  if (routeThroughGraph(sites, edges, b, a)) return `There is no route from ${a} to ${b}: the lanes between them are one-way, from ${b} to ${a}.`;
+  if (!edges.some((e) => e.to === b || (e.from === b && e.bidirectional !== false))) return `There is no route from ${a} to ${b}: no lane leads to ${b}.`;
+  return `There is no route from ${a} to ${b} along the lanes.`;
 }
 
 /**
- * The route the robot takes through the stops, leg by leg, along the lanes.
- * The first stop has no leg unless `start` names the site to begin from.
+ * The route the robot takes through the stops, leg by leg, along the lanes,
+ * with mission_runner's rules: each Follow route starts at its `from`, else at
+ * the destination of the Follow route before it, else at the point nearest the
+ * robot (unknown here, so that first hop is decided on the robot); then it
+ * passes every `through` site in order and ends at `to`, each hop planned on
+ * the graph.
  */
 export function planRoute(stops: readonly Stop[], sites: Record<string, Site>, edges: readonly Edge[], mission?: Mission | null, start?: string | null): PlannedLeg[] {
   const legs: PlannedLeg[] = [];
-  let from = start && sites[start] ? start : null;
+  let previous = start && sites[start] ? start : null;
   stops.forEach((stop, stopIndex) => {
+    const step = stop.step;
+    const direct = step.on_no_route === "direct";
     const to = stopSite(stop, mission);
     if (to === null) {
-      from = null;
+      previous = null;
       return;
     }
-    if (!sites[to]) {
-      legs.push({ route: [], stopIndex, problem: `site '${to}' is not on this map` });
-      from = null;
+    const through = throughSites(step);
+    const missing = [...through, to].filter((name) => !sites[name]);
+    if (missing.length > 0) {
+      const names = missing.join(", ");
+      legs.push({ route: [], stopIndex, problem: `${names} ${missing.length === 1 ? "is not a point" : "are not points"} on this map.`, start: null, direct, lengthM: 0 });
+      previous = null;
       return;
     }
-    if (from !== null) {
-      const route = routeThroughGraph(sites, edges, from, to);
-      if (route) legs.push({ route, stopIndex, problem: "" });
-      else legs.push({ route: [from, to], stopIndex, problem: `no lane route from ${from} to ${to}` });
+    const from = typeof step.from === "string" && step.from !== "" && !hasExpression(step.from) && sites[step.from] ? step.from : previous;
+    const waypoints = from !== null ? [from, ...through, to] : [...through, to];
+    const route = [waypoints[0]!];
+    let problem = "";
+    for (let i = 1; i < waypoints.length; i++) {
+      const a = waypoints[i - 1]!;
+      const b = waypoints[i]!;
+      if (a === b) continue;
+      const hop = routeThroughGraph(sites, edges, a, b);
+      if (hop) route.push(...hop.slice(1));
+      else {
+        route.push(b);
+        if (problem === "") problem = noRouteSentence(sites, edges, a, b);
+      }
     }
-    from = to;
+    let lengthM = 0;
+    for (let i = 1; i < route.length; i++) {
+      const p = sites[route[i - 1]!]!;
+      const q = sites[route[i]!]!;
+      lengthM += Math.hypot(q.x - p.x, q.y - p.y);
+    }
+    legs.push({ route, stopIndex, problem, start: from, direct, lengthM });
+    previous = to;
   });
   return legs;
+}
+
+export interface Arrival {
+  mission: string;
+  /** The Follow route that arrives at the point. */
+  step: Step;
+  /** Path of that step in its mission. */
+  path: Path;
+  /** The steps after it in the same list, up to the next Follow route: what happens there. */
+  actions: Step[];
+}
+
+/**
+ * Where a mission arrives at a point, and what it does there. A mission is a
+ * sequence, so "the actions at a point" are the steps that follow a Follow
+ * route to that point in the same list, until the next Follow route.
+ */
+export function arrivalsAt(missions: readonly Mission[], site: string): Arrival[] {
+  const out: Arrival[] = [];
+  for (const mission of missions) {
+    for (const visit of walkSteps(mission)) {
+      if (visit.step.type !== STOP_TYPE || visit.step.to !== site) continue;
+      const list = getList(mission, visit.path.slice(0, -1));
+      const index = visit.path[visit.path.length - 1];
+      const actions: Step[] = [];
+      if (list && typeof index === "number") {
+        for (let i = index + 1; i < list.length; i++) {
+          const next = list[i]!;
+          if (next.type === STOP_TYPE) break;
+          actions.push(next);
+        }
+      }
+      out.push({ mission: mission.name, step: visit.step, path: visit.path, actions });
+    }
+  }
+  return out;
+}
+
+/** The planned leg of one Follow route step of the open mission. */
+export function planForStep(stepId: string, stops: readonly Stop[], sites: Record<string, Site>, edges: readonly Edge[], mission?: Mission | null): PlannedLeg | null {
+  const index = stops.findIndex((s) => s.step.id === stepId);
+  if (index < 0) return null;
+  return planRoute(stops, sites, edges, mission).find((leg) => leg.stopIndex === index) ?? null;
 }

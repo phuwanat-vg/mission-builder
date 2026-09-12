@@ -78,6 +78,7 @@ export const STEP_TYPES = [
   "nav.clear_costmap", "nav.dock", "nav.undock", "nav.lifecycle", "nav.cancel",
   "ros.publish", "ros.call_service", "ros.call_action", "ros.set_param",
   "mqtt.publish", "http.request", "modbus.write", "gpio.write",
+  "ros.request",
   "set", "if", "loop", "break", "wait", "wait_event", "ask_user", "log", "run_mission", "end",
 ] as const;
 export type StepType = (typeof STEP_TYPES)[number];
@@ -110,6 +111,8 @@ export interface FollowRouteStep extends StepBase {
   to: string;
   /** Start site; defaults to the graph node nearest the robot. */
   from?: string;
+  /** Sites passed in order before `to`; every leg is planned on the graph. */
+  through?: string[];
   on_no_route?: "fail" | "direct";
   apply_speed_limits?: boolean;
   behavior_tree?: BehaviorTree;
@@ -141,6 +144,26 @@ export interface IfStep extends StepBase { type: "if"; condition: string; then: 
 export interface LoopStep extends StepBase { type: "loop"; count?: number | string; while?: string; body: Step[] }
 export interface WaitStep extends StepBase { type: "wait"; seconds: number | string }
 export interface WaitEventStep extends StepBase { type: "wait_event"; source: EventSource; on_timeout?: "abort" | "continue" }
+/**
+ * Publish a JSON request on `request_topic` and wait for the answer with the
+ * same id on `answer_topic` (both `std_msgs/msg/String`). iViz's Dashboard
+ * answers this exchange, and so can any node.
+ */
+export interface RosRequestStep extends StepBase {
+  type: "ros.request";
+  text: string;
+  /** Empty or absent: any answer is accepted. */
+  options?: string[];
+  default?: string;
+  on_timeout?: "default" | "fail";
+  request_topic?: string;
+  answer_topic?: string;
+  /** Defaults to the site of the last `nav.follow_route`. */
+  station?: string;
+  data?: Record<string, unknown>;
+}
+export const DEFAULT_REQUEST_TOPIC = "/iviz/request";
+export const DEFAULT_ANSWER_TOPIC = "/iviz/answer";
 export interface AskUserStep extends StepBase { type: "ask_user"; text: string; options?: string[]; default?: string }
 export interface LogStep extends StepBase { type: "log"; text: string; level?: "debug" | "info" | "warn" | "error" }
 export interface RunMissionStep extends StepBase { type: "run_mission"; mission: string; inputs?: Record<string, unknown> }
