@@ -10,12 +10,12 @@ const DEFAULTS: SettingsValues = {};
 
 /** Frames tried, in order, for where the robot is. */
 const ROBOT_FRAMES = ["base_link", "base_footprint"];
-/** Until Nav2 publishes a footprint: a 0.5 m x 0.4 m body. */
+/** Until Nav2 publishes a footprint: a 0.4 m x 0.3 m body. */
 const DEFAULT_FOOTPRINT: [number, number][] = [
-  [0.25, 0.2],
-  [-0.25, 0.2],
-  [-0.25, -0.2],
-  [0.25, -0.2],
+  [0.2, 0.15],
+  [-0.2, 0.15],
+  [-0.2, -0.15],
+  [0.2, -0.15],
 ];
 const AXIS_RED = "#e53935";
 const AXIS_GREEN = "#2e9e44";
@@ -73,9 +73,9 @@ export class RobotLayer extends Layer {
     if (this.#pending) this.#takeFootprint(ctx, this.#pending);
     if (!ctx.tf.lookup(ctx.fixedFrame, frame, _m)) return;
     this.root.matrix.copy(_m);
-    // Never smaller than ~18 px across its reach, so it stays visible zoomed out.
+    // Never smaller than ~10 px across its reach, so it stays findable zoomed out.
     const ppm = this.#pixelsPerMeter();
-    const minPx = 18;
+    const minPx = 10;
     this.#body.scale.setScalar(ppm > 0 && this.#reach * ppm < minPx ? minPx / (this.#reach * ppm) : 1);
     this.root.visible = true;
   }
@@ -109,7 +109,7 @@ export class RobotLayer extends Layer {
 
     const shape = new Shape(pts.map(([x, y]) => ({ x, y }) as never));
     // A white halo under the body so it reads on black walls and on grey unknown space.
-    const grow = 1 + 0.06 / reach;
+    const grow = 1 + 0.025 / reach;
     const haloShape = new Shape(pts.map(([x, y]) => ({ x: x * grow, y: y * grow }) as never));
     const halo = new Mesh(new ShapeGeometry(haloShape), overlay(new MeshBasicMaterial({ color: "#ffffff", opacity: 0.9, side: DoubleSide })));
     halo.position.z = Z - 0.001;
@@ -122,7 +122,7 @@ export class RobotLayer extends Layer {
     const outline = new Line(new BufferGeometry().setFromPoints(outlinePts), overlay(new LineBasicMaterial({ color: c.accent })));
     outline.renderOrder = 16;
     // A second, slightly larger ring so the edge reads as a thick line.
-    const s = 1 + 0.02 / reach;
+    const s = 1 + 0.01 / reach;
     const outline2 = new Line(new BufferGeometry().setFromPoints(outlinePts.map((p) => new Vector3(p.x * s, p.y * s, Z))), overlay(new LineBasicMaterial({ color: c.accent })));
     outline2.renderOrder = 16;
 
@@ -138,11 +138,11 @@ export class RobotLayer extends Layer {
     arrow.position.z = Z + 0.001;
     arrow.renderOrder = 17;
 
-    // base_link axes as thin bars, long enough to stick out of the body.
-    const len = reach * 1.5;
-    const thick = Math.max(0.018, reach * 0.06);
+    // base_link axes as thin bars, just past the body's edge.
+    const len = reach * 1.15;
+    const thick = Math.max(0.01, reach * 0.035);
     const xAxis = bar(len, thick, AXIS_RED);
-    const yAxis = bar(len * 0.7, thick, AXIS_GREEN);
+    const yAxis = bar(len * 0.75, thick, AXIS_GREEN);
     yAxis.rotation.z = Math.PI / 2;
     for (const a of [xAxis, yAxis]) {
       a.position.z = Z + 0.002;

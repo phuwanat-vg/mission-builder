@@ -301,10 +301,13 @@ export class MapView {
     this.#gridLayers.set(preferred.topic, { layer, unsubscribe });
   }
 
-  /** The robot's outline from Nav2's costmaps, global first (it is in the map frame). */
+  /**
+   * The robot's outline from Nav2's costmaps, local first: the global costmap's
+   * footprint is often set larger for planning margin, the local one is the body.
+   */
   #subscribeFootprint(channels: readonly Channel[]): void {
     const polys = channels.filter((c) => normalizeSchemaName(c.schemaName) === "geometry_msgs/PolygonStamped" && c.topic.endsWith("published_footprint"));
-    const best = polys.find((c) => c.topic.includes("global_costmap")) ?? polys[0];
+    const best = polys.find((c) => c.topic.includes("local_costmap")) ?? polys[0];
     if (!best || best.topic === this.#footprintTopic) return;
     this.#unsubFootprint?.();
     this.#footprintTopic = best.topic;
