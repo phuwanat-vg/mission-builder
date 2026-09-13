@@ -14,13 +14,14 @@
 
 import { Viewer } from "../viz/Viewer";
 import type { ToolName } from "../viz/Viewer";
-import { TfLayer, createLayer, isSupportedSchema } from "../viz/layers";
+import { createLayer, isSupportedSchema } from "../viz/layers";
 import type { Layer } from "../viz/layers";
 import { RouteLayer } from "../viz/layers/RouteLayer";
+import { RobotLayer } from "../viz/layers/RobotLayer";
 import { RouteTools, TOOL_LINK, TOOL_POINT, TOOL_SELECT } from "./RouteTools";
 import { TfTree } from "../ros/TfTree";
 import { normalizeSchemaName } from "../ros/types";
-import type { TFMessage } from "../ros/types";
+import type { PolygonStamped, TFMessage } from "../ros/types";
 import type { FoxgloveConnection } from "../net/FoxgloveConnection";
 import type { RouteStore } from "../mission/RouteStore";
 import { boundsOf } from "../mission/geometry";
@@ -66,7 +67,9 @@ export class MapView {
   #coordsEl: HTMLElement;
   #whereEl: HTMLElement;
   #guideEl: HTMLElement;
-  #tfLayer: TfLayer;
+  #robotLayer: RobotLayer;
+  #footprintTopic = "";
+  #unsubFootprint: (() => void) | null = null;
   #gridLayers = new Map<string, { layer: Layer; unsubscribe: () => void }>();
   #unsubTf: (() => void)[] = [];
   #unsubTheme: () => void;
@@ -87,12 +90,16 @@ export class MapView {
     this.viewer.setMode("2d");
     this.viewer.onToolChange = (tool) => this.#syncTools(tool);
 
-    this.#tfLayer = new TfLayer({});
-    this.#tfLayer.visible = true;
-    this.viewer.addLayer(this.#tfLayer);
-
     this.routeLayer = new RouteLayer(this.viewer, host.store);
     this.viewer.addLayer(this.routeLayer);
+
+    // The robot as a body with its axes, not every TF frame (lidar, camera, ...).
+    this.#robotLayer = new RobotLayer(() => {
+      const a = this.viewer.worldToScreenPoint(0, 0);
+      const b = this.viewer.worldToScreenPoint(1, 0);
+      return Math.hypot(b.x - a.x, b.y - a.y);
+    });
+    this.viewer.addLayer(this.#robotLayer);
 
     this.#tools = new RouteTools({
       viewer: this.viewer,
@@ -130,6 +137,7 @@ export class MapView {
     clearInterval(this.#tickTimer);
     this.#unsubTheme();
     for (const u of this.#unsubTf) u();
+    this.#unsubFootprint?.();
     this.#tools.dispose();
     for (const g of this.#gridLayers.values()) g.unsubscribe();
     this.viewer.dispose();
@@ -140,7 +148,7 @@ export class MapView {
   #applyTheme(colors: ThemeColors): void {
     this.viewer.setThemeColors(colors);
     this.routeLayer.setThemeColors(colors);
-    this.#tfLayer.setThemeColors(colors);
+    this.#robotLayer.setThemeColors(colors);
   }
 
   // ---- tools --------------------------------------------------------------
@@ -281,6 +289,7 @@ export class MapView {
 
   /** Subscribe the robot's occupancy grid the first time it is advertised. */
   onChannels(channels: readonly Channel[]): void {
+    this.#subscribeFootprint(channels);
     const grids = channels.filter((c) => normalizeSchemaName(c.schemaName) === "nav_msgs/OccupancyGrid" && !c.topic.includes("costmap"));
     const preferred = grids.find((c) => c.topic === "/map") ?? grids[0];
     if (!preferred || this.#gridLayers.has(preferred.topic)) return;
@@ -290,6 +299,16 @@ export class MapView {
     const unsubscribe = this.#host.conn.subscribe(preferred.topic, (msg, _c, now) => layer.onMessage(msg, now));
     this.viewer.addLayer(layer);
     this.#gridLayers.set(preferred.topic, { layer, unsubscribe });
+  }
+
+  /** The robot's outline from Nav2's costmaps, global first (it is in the map frame). */
+  #subscribeFootprint(channels: readonly Channel[]): void {
+    const polys = channels.filter((c) => normalizeSchemaName(c.schemaName) === "geometry_msgs/PolygonStamped" && c.topic.endsWith("published_footprint"));
+    const best = polys.find((c) => c.topic.includes("global_costmap")) ?? polys[0];
+    if (!best || best.topic === this.#footprintTopic) return;
+    this.#unsubFootprint?.();
+    this.#footprintTopic = best.topic;
+    this.#unsubFootprint = this.#host.conn.subscribe(best.topic, (msg) => this.#robotLayer.onFootprint(msg as PolygonStamped));
   }
 
   get hasGrid(): boolean {
