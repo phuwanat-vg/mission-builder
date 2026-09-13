@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.1
 
 - **Start position (initial pose)**: a point's properties have a *Start
   position* section. **Robot starts here (initial pose)** makes it the map's
