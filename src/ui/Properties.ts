@@ -24,7 +24,7 @@ import { buildTree, findNode } from "../mission/tree";
 import type { TreeNode } from "../mission/tree";
 import { pathToString, validateInitialPoses, validateSiteTopics } from "../mission/validate";
 import { lastRouteSiteBefore, requestTopics, suggestedTopics, topicNote } from "../mission/requestTopics";
-import { arrivalsAt, planForStep } from "../mission/stops";
+import { arrivalsAt, planForStep, routeSegments, waypointSpacing } from "../mission/stops";
 import type { Arrival } from "../mission/stops";
 import { hasExpression } from "../mission/expressions";
 
@@ -383,6 +383,7 @@ export class Properties {
     const chain = leg.start === null ? ["(nearest point to the robot)", ...leg.route] : leg.route;
     body.append(h("div", { class: `route-chain${leg.problem ? " bad" : ""}`, text: chain.join(" → ") }));
     if (leg.route.length > 1) body.append(h("div", { class: "stats", text: `${leg.route.length - 1} ${leg.route.length === 2 ? "lane" : "lanes"}, ${leg.lengthM.toFixed(1)} m` }));
+    this.#appendSegments(body, step, leg.route);
     if (leg.problem) {
       body.append(
         h("div", { class: `finding ${leg.direct ? "warning" : "error"}` }, h("div", { text: leg.direct ? `${leg.problem} The robot drives straight there instead, because 'When there is no route' is direct.` : leg.problem })),
@@ -396,6 +397,30 @@ export class Properties {
           ? `It starts from ${from}.`
           : `It starts from ${leg.start}, where the Follow route before it ends.`;
     body.append(h("p", { class: "prose muted", text: startSentence }));
+  }
+
+  /** How the planned chain is handed to Nav2: through poses on normal lanes, FollowPath on strict ones. */
+  #appendSegments(body: HTMLElement, step: Step, route: readonly string[]): void {
+    const store = this.#host.store;
+    const spacing = waypointSpacing(step);
+    const segments = routeSegments(route, store.points, store.lanes, spacing, step.apply_speed_limits === true);
+    if (segments.length === 0) return;
+    const list = h("div", { class: "route-segments" });
+    let waypoints = 0;
+    let pathPoses = 0;
+    for (const seg of segments) {
+      const mode = seg.leadIn ? "First to the lane's start" : seg.mode === "follow_path" ? "Exact along lane" : seg.mode === "go_to_pose" ? "Go to pose" : "Through poses";
+      const count = seg.mode === "follow_path" ? `path of ${seg.poses} poses` : `${seg.poses} ${seg.poses === 1 ? "waypoint" : "waypoints"}`;
+      if (seg.mode === "follow_path") pathPoses += seg.poses;
+      else waypoints += seg.poses;
+      const title = seg.leadIn ? `NavigateToPose to ${seg.sites[0]}, only when the robot is not already there` : seg.mode === "follow_path" ? "FollowPath along the straight lines: stops instead of going around obstacles" : seg.mode === "go_to_pose" ? "NavigateToPose" : "NavigateThroughPoses";
+      list.append(h("div", { class: `route-segment ${seg.mode}${seg.leadIn ? " lead-in" : ""}`, title }, h("span", { class: "seg-mode", text: mode }), h("span", { class: "seg-sites", text: seg.sites.join(" → ") }), h("span", { class: "stats", text: count })));
+    }
+    body.append(list);
+    const spacingText = typeof step.waypoint_spacing_m === "number" || step.waypoint_spacing_m === undefined ? (spacing === 0 ? "only the lanes' points" : `a pose every ${spacing} m`) : `a pose every ${spacing} m until ${String(step.waypoint_spacing_m)} is known`;
+    const parts = [`About ${waypoints} ${waypoints === 1 ? "waypoint" : "waypoints"} (${spacingText})`];
+    if (pathPoses > 0) parts.push(`${pathPoses} path poses on exact lanes`);
+    body.append(h("div", { class: "stats route-summary", text: `${parts.join(", ")}.` }));
   }
 
   #renderContainer(node: TreeNode): void {
@@ -444,7 +469,9 @@ export class Properties {
       const other = lane.from === name ? lane.to : lane.from;
       const glyph = lane.bidirectional === false ? (lane.from === name ? "→" : "←") : "⇄";
       const sentence = lane.bidirectional === false ? (lane.from === name ? `One-way from ${name} to ${other}` : `One-way from ${other} to ${name}`) : `Two-way between ${name} and ${other}`;
-      const btn = h("button", { class: "list-row", title: `${sentence}${lane.blocked === true ? ", blocked" : ""}.` }, h("span", { class: "lane-glyph", text: glyph }), h("span", { text: other }), ...(lane.blocked === true ? [h("span", { class: "pill", text: "blocked" })] : []));
+      const tags = [...(lane.strict === true ? [h("span", { class: "pill", text: "exact" })] : []), ...(lane.blocked === true ? [h("span", { class: "pill", text: "blocked" })] : [])];
+      const title = `${sentence}${lane.strict === true ? ", driven exactly along the lane" : ""}${lane.blocked === true ? ", blocked" : ""}.`;
+      const btn = h("button", { class: "list-row", title }, h("span", { class: "lane-glyph", text: glyph }), h("span", { text: other }), ...tags);
       btn.addEventListener("click", () => {
         store.select({ kind: "lane", index });
         this.#host.refresh();
@@ -696,6 +723,15 @@ export class Properties {
     });
     body.append(row("Blocked", blocked));
     body.append(h("p", { class: "prose muted", text: "A blocked lane is closed temporarily. The planner routes around it and it is drawn as a dashed red line." }));
+
+    const strict = h("input", { type: "checkbox" });
+    strict.checked = lane.strict === true;
+    strict.addEventListener("change", () => {
+      store.updateLane(index, { strict: strict.checked ? true : undefined }, strict.checked ? "Drive exactly along the lane" : "Let the planner drive the lane");
+      this.#host.refresh();
+    });
+    body.append(h("label", { class: "check-row strict-check" }, strict, h("span", { text: "Drive exactly along this lane" })));
+    body.append(h("p", { class: "prose muted", text: "Uses FollowPath along the straight line, drawn as a double line: no detours, and the robot stops instead of going around an obstacle." }));
 
     const speed = h("input", { type: "number", min: 0, step: 0.05, value: lane.speed_mps === undefined ? "" : String(lane.speed_mps), placeholder: "(no cap)" });
     speed.addEventListener("change", () => {

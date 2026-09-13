@@ -47,7 +47,7 @@ import type { Viewer } from "../Viewer";
 import type { RouteStore } from "../../mission/RouteStore";
 import type { Edge, Site, SiteKind } from "../../mission/types";
 import { pointOnSegment } from "../../mission/geometry";
-import { planRoute, stopSite } from "../../mission/stops";
+import { laneBetween, planRoute, stopSite } from "../../mission/stops";
 import { themeColors } from "../../ui/theme";
 import type { ThemeColors } from "../../ui/theme";
 
@@ -73,6 +73,11 @@ const LANE_PX = 1.25;
 const ROUTE_PX = 2.5;
 /** The soft band marking the hovered or selected lane, under the lane itself. */
 const HIGHLIGHT_PX = 7;
+/** A strict lane: two hairlines this far apart, centre to centre. */
+const STRICT_GAP_PX = 4;
+/** The route over a strict lane: two lines of this weight, this far apart. */
+const STRICT_ROUTE_PX = 1.75;
+const STRICT_ROUTE_GAP_PX = 4.5;
 const DASH_PX = 9;
 const DASH_GAP_PX = 6;
 const CHEVRON_PX = 5;
@@ -336,8 +341,13 @@ export class RouteLayer extends Layer {
       }
       this.#laneEnds.push({ ax: a.x, ay: a.y, bx: b.x, by: b.y });
       const color = new Color(lane.blocked === true ? c.err : c.muted);
-      if (lane.blocked === true) pushDashes(pos, col, a.x, a.y, b.x, b.y, laneWidth, color, Z_LANE, wpp * DASH_PX, wpp * DASH_GAP_PX);
-      else pushRibbon(pos, col, a.x, a.y, b.x, b.y, laneWidth, color, Z_LANE);
+      // A strict lane is a double line, the drafting mark for a fixed track.
+      const offsets = lane.strict === true ? [-wpp * STRICT_GAP_PX / 2, wpp * STRICT_GAP_PX / 2] : [0];
+      for (const off of offsets) {
+        const [ax, ay, bx, by] = offsetLine(a.x, a.y, b.x, b.y, off);
+        if (lane.blocked === true) pushDashes(pos, col, ax, ay, bx, by, laneWidth, color, Z_LANE, wpp * DASH_PX, wpp * DASH_GAP_PX);
+        else pushRibbon(pos, col, ax, ay, bx, by, laneWidth, color, Z_LANE);
+      }
       pushLaneChevrons(pos, col, lane, a, b, color, wpp);
       // A speed cap keeps the lane colour and says what it is in text.
       if (typeof lane.speed_mps === "number" && lane.speed_mps > 0) {
@@ -359,7 +369,15 @@ export class RouteLayer extends Layer {
         const a = sites[leg.route[i - 1]!];
         const b = sites[leg.route[i]!];
         if (!a || !b) continue;
-        pushRibbon(rpos, rcol, a.x, a.y, b.x, b.y, routeWidth, color, Z_ROUTE);
+        if (laneBetween(lanes, leg.route[i - 1]!, leg.route[i]!)?.strict === true) {
+          // Driven exactly: the route keeps the lane's double line, at the emphasis weight.
+          for (const off of [-wpp * STRICT_ROUTE_GAP_PX / 2, wpp * STRICT_ROUTE_GAP_PX / 2]) {
+            const [ax, ay, bx, by] = offsetLine(a.x, a.y, b.x, b.y, off);
+            pushRibbon(rpos, rcol, ax, ay, bx, by, wpp * STRICT_ROUTE_PX, color, Z_ROUTE);
+          }
+        } else {
+          pushRibbon(rpos, rcol, a.x, a.y, b.x, b.y, routeWidth, color, Z_ROUTE);
+        }
       }
       this.#legRanges.push({ stopIndex: leg.stopIndex, start, count: rpos.length / 3 - start, route: leg.route.slice(), problem: leg.problem !== "" });
     }
@@ -696,6 +714,15 @@ function pushRibbon(pos: number[], col: number[], ax: number, ay: number, bx: nu
   pushVertex(pos, col, ax + nx, ay + ny, z, c);
   pushVertex(pos, col, bx - nx, by - ny, z, c);
   pushVertex(pos, col, bx + nx, by + ny, z, c);
+}
+
+/** The line a-b moved sideways by `off` metres (to the left of a -> b). */
+function offsetLine(ax: number, ay: number, bx: number, by: number, off: number): [number, number, number, number] {
+  const len = Math.hypot(bx - ax, by - ay);
+  if (off === 0 || len < 1e-6) return [ax, ay, bx, by];
+  const nx = (-(by - ay) / len) * off;
+  const ny = ((bx - ax) / len) * off;
+  return [ax + nx, ay + ny, bx + nx, by + ny];
 }
 
 /** A dashed line: a blocked lane. Dash and gap are screen-constant. */

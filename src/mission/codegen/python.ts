@@ -132,7 +132,11 @@ function emitAction(g: Gen, step: Step): Emitted {
       const through = Array.isArray(step.through) ? pyValue(step.through) : "[]";
       const start = typeof step.from === "string" && step.from !== "" ? pyValue(step.from) : "None";
       const onNoRoute = step.on_no_route === "direct" ? "direct" : "fail";
-      L.push(`value = follow_route(nav, ${pyValue(step.to ?? "")}, ${through}, ${start}, ${JSON.stringify(onNoRoute)}, ctx)`);
+      const spacing = step.waypoint_spacing_m === undefined ? "0.75" : pyValue(step.waypoint_spacing_m);
+      const ids: string[] = [];
+      if (typeof step.controller_id === "string" && step.controller_id !== "") ids.push(`, controller_id=${JSON.stringify(step.controller_id)}`);
+      if (typeof step.goal_checker_id === "string" && step.goal_checker_id !== "") ids.push(`, goal_checker_id=${JSON.stringify(step.goal_checker_id)}`);
+      L.push(`value = follow_route(nav, ${pyValue(step.to ?? "")}, ${through}, ${start}, ${JSON.stringify(onNoRoute)}, ctx, spacing=${spacing}${ids.join("")})`);
       L.push("ok = value is not None");
       return out(true, true);
     }
@@ -634,7 +638,7 @@ def plan_route(start, goal):
     if start not in SITES or goal not in SITES:
         return None
     adj = {}
-    for a, b, both, blocked, cost in EDGES:
+    for a, b, both, blocked, cost, _exact in EDGES:
         if blocked or a == b or a not in SITES or b not in SITES:
             continue
         length = math.hypot(SITES[b][0] - SITES[a][0], SITES[b][1] - SITES[a][1]) * max(0.01, cost)
@@ -666,7 +670,7 @@ def plan_route(start, goal):
 def nearest_graph_site(x, y):
     """The site nearest (x, y) that a lane can be driven from."""
     on_graph = set()
-    for a, b, both, blocked, _cost in EDGES:
+    for a, b, both, blocked, _cost, _exact in EDGES:
         if not blocked:
             on_graph.add(a)
             if both:
@@ -675,9 +679,81 @@ def nearest_graph_site(x, y):
     return min(names, key=lambda n: math.hypot(SITES[n][0] - x, SITES[n][1] - y), default=None)
 
 
-def follow_route(nav, to, through, start, on_no_route, ctx):
-    """nav.follow_route: plan start -> through... -> to on the lanes and send only
-    waypoints that lie on them, with goThroughPoses."""
+def lane_between(a, b):
+    """The open lane the robot drives from a to b, or None."""
+    for lane in EDGES:
+        la, lb, both, blocked = lane[0], lane[1], lane[2], lane[3]
+        if not blocked and ((la == a and lb == b) or (both and la == b and lb == a)):
+            return lane
+    return None
+
+
+def heading(a, b):
+    """Degrees from site a towards site b (b's yaw when they coincide)."""
+    ax, ay, _ = SITES[a]
+    bx, by, byaw = SITES[b]
+    if math.hypot(bx - ax, by - ay) < 1e-9:
+        return byaw
+    return math.degrees(math.atan2(by - ay, bx - ax))
+
+
+def lane_waypoints(nav, a, b, spacing):
+    """Poses at spacing, 2 x spacing, ... short of b along the lane a -> b, facing b."""
+    ax, ay, _ = SITES[a]
+    bx, by, _ = SITES[b]
+    dist = math.hypot(bx - ax, by - ay)
+    poses, k = [], 1
+    while spacing > 0 and k * spacing < dist - 1e-6:
+        t = k * spacing / dist
+        poses.append(make_pose(nav, ax + (bx - ax) * t, ay + (by - ay) * t, heading(a, b)))
+        k += 1
+    return poses
+
+
+def exact_path(nav, names, last_yaw):
+    """nav_msgs/Path along the straight lines through the sites, a pose every 0.05 m."""
+    path = Path()
+    path.header.frame_id = "map"
+    path.header.stamp = nav.get_clock().now().to_msg()
+    for a, b in zip(names, names[1:]):
+        ax, ay, _ = SITES[a]
+        bx, by, _ = SITES[b]
+        n = max(1, int(math.hypot(bx - ax, by - ay) / 0.05))
+        for i in range(n):
+            path.poses.append(make_pose(nav, ax + (bx - ax) * i / n, ay + (by - ay) * i / n, heading(a, b)))
+    x, y, _ = SITES[names[-1]]
+    path.poses.append(make_pose(nav, x, y, last_yaw))
+    return path
+
+
+def route_segments(chain):
+    """Split a chain of sites into runs of normal lanes and runs of exact
+    (strict) lanes: [("through_poses" | "follow_path", [sites...]), ...]."""
+    runs = []
+    for a, b in zip(chain, chain[1:]):
+        lane = lane_between(a, b)
+        mode = "follow_path" if lane is not None and lane[5] else "through_poses"
+        if runs and runs[-1][0] == mode:
+            runs[-1][1].append(b)
+        else:
+            runs.append((mode, [a, b]))
+    return runs
+
+
+def robot_at(nav, name, tolerance=0.3):
+    robot = robot_pose(nav)
+    if robot is None:
+        return False
+    x, y, _ = SITES[name]
+    return math.hypot(robot.pose.position.x - x, robot.pose.position.y - y) <= tolerance
+
+
+def follow_route(nav, to, through, start, on_no_route, ctx, spacing=0.75, controller_id="", goal_checker_id=""):
+    """nav.follow_route: plan start -> through... -> to on the lanes. Normal
+    lanes go to goThroughPoses with a pose every spacing m along them; exact
+    lanes are driven with followPath along the straight line (no detours: the
+    robot stops instead of going around an obstacle), like mission_runner."""
+    spacing = max(0.0, float(val(spacing, ctx)))
     to = str(val(to, ctx))
     through = [str(val(t, ctx)) for t in (val(through, ctx) or [])]
     for name in [*through, to]:
@@ -701,15 +777,44 @@ def follow_route(nav, to, through, start, on_no_route, ctx):
             print(f"no route from '{a}' to '{b}'; driving direct", file=sys.stderr)
             leg = [a, b]
         chain.extend(leg[1:])
-    poses = [site(nav, n) for n in chain[1:]] or [site(nav, to)]
-    if len(poses) == 1:
-        nav.goToPose(poses[0])
-    else:
-        nav.goThroughPoses(poses)
-    if not wait_task(nav):
-        return None
+    driven = []
+    runs = route_segments(chain)
+    if not runs:  # already at the destination
+        nav.goToPose(site(nav, to))
+        if not wait_task(nav):
+            return None
+        driven.append({"mode": "go_to_pose", "sites": [to], "poses": 1})
+    for i, (mode, names) in enumerate(runs):
+        last = i == len(runs) - 1
+        # Where this run ends: the destination keeps its heading, a node faces the next lane.
+        end_yaw = SITES[to][2] if last else heading(names[-1], runs[i + 1][1][1])
+        if mode == "follow_path":
+            if i == 0 and not robot_at(nav, names[0]):
+                # FollowPath does not plan from where the robot is, so get onto the lane first.
+                nav.goToPose(site(nav, names[0], heading(names[0], names[1])))
+                if not wait_task(nav):
+                    return None
+                driven.append({"mode": "go_to_pose", "sites": [names[0]], "poses": 1})
+            # A path that hands over to more lanes ends facing along its own last lane.
+            path = exact_path(nav, names, end_yaw if last else heading(names[-2], names[-1]))
+            nav.followPath(path, controller_id=controller_id, goal_checker_id=goal_checker_id)
+            count = len(path.poses)
+        else:
+            poses = []
+            for j, (a, b) in enumerate(zip(names, names[1:])):
+                poses.extend(lane_waypoints(nav, a, b, spacing))
+                poses.append(site(nav, b, end_yaw if j == len(names) - 2 else heading(b, names[j + 2])))
+            if len(poses) == 1:
+                mode = "go_to_pose"
+                nav.goToPose(poses[0])
+            else:
+                nav.goThroughPoses(poses)
+            count = len(poses)
+        if not wait_task(nav):
+            return None
+        driven.append({"mode": mode, "sites": list(names), "poses": count})
     ctx["_last_site"] = to
-    return {"route": chain, "from": start, "to": to, "through": through}
+    return {"route": chain, "from": start, "to": to, "through": through, "segments": driven}
 `;
 
 const REQUEST_HELPERS = `
@@ -822,7 +927,7 @@ export function generatePython(mission: Mission, opts: PythonOptions = {}): stri
   const edgeEntries: string[] = [];
   if (sites && activeMap && sites.maps[activeMap]) {
     for (const e of sites.maps[activeMap]!.edges ?? []) {
-      edgeEntries.push(`    (${JSON.stringify(e.from)}, ${JSON.stringify(e.to)}, ${e.bidirectional === false ? "False" : "True"}, ${e.blocked === true ? "True" : "False"}, ${typeof e.cost === "number" ? e.cost : 1}),`);
+      edgeEntries.push(`    (${JSON.stringify(e.from)}, ${JSON.stringify(e.to)}, ${e.bidirectional === false ? "False" : "True"}, ${e.blocked === true ? "True" : "False"}, ${typeof e.cost === "number" ? e.cost : 1}, ${e.strict === true ? "True" : "False"}),`);
     }
   }
 
@@ -864,7 +969,7 @@ export function generatePython(mission: Mission, opts: PythonOptions = {}): stri
     parts.push(`ANSWER_TOPIC = ${JSON.stringify(g.answerTopic)}`);
     parts.push(`SITE_TOPICS = {${topicEntries.length ? `\n${topicEntries.join("\n")}\n` : ""}}  # points of the active map with their own request/answer topics`);
   }
-  if (g.usesRoute) parts.push(`EDGES = [${edgeEntries.length ? `\n${edgeEntries.join("\n")}\n` : ""}]  # lanes of the active map: (from, to, two-way, blocked, cost)`);
+  if (g.usesRoute) parts.push(`EDGES = [${edgeEntries.length ? `\n${edgeEntries.join("\n")}\n` : ""}]  # lanes of the active map: (from, to, two-way, blocked, cost, exact)`);
   parts.push(HELPERS.trimEnd());
   if (g.usesRoute) parts.push(ROUTE_HELPERS.trimEnd());
   if (g.usesRequest) parts.push(REQUEST_HELPERS.trimEnd());

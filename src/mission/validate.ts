@@ -284,6 +284,9 @@ function checkStep(w: WalkCtx, step: Record<string, unknown>, path: Path, inLoop
     checkParam(c, p, v, [...path, p.key], sid, ctx);
   }
   if (type === "nav.follow_path" && step.points === undefined && step.path === undefined) c.err(path, "Follow path needs points or a path", sid);
+  if (type === "nav.follow_route" && typeof step.waypoint_spacing_m === "number" && step.waypoint_spacing_m > 0 && step.waypoint_spacing_m < 0.2) {
+    c.warn([...path, "waypoint_spacing_m"], "waypoint spacing below 0.2 m is very dense, many waypoints", sid);
+  }
   if (type === "if" && !Array.isArray(step.then)) c.err([...path, "then"], "'if' needs a 'then' list", sid);
   if (type === "loop") {
     if (step.count !== undefined && step.while !== undefined) c.err(path, "loop takes either 'count' or 'while', not both", sid);

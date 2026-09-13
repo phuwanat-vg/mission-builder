@@ -114,6 +114,14 @@ map, computed with the runner's rules: Dijkstra over lane length × cost, one-wa
 and blocked lanes honoured. A task the lanes cannot drive is marked red with a
 sentence saying why.
 
+Between two points Nav2 still plans its own path, so Follow route adds a pose
+every **Waypoint spacing (m)** along each lane (0.75 m by default, under
+*Advanced*) to keep the robot on it. Where that is not enough, select the lane
+and tick **Drive exactly along this lane**: it is driven with FollowPath along
+the straight line, drawn as a double line, and the robot stops rather than
+going around an obstacle. The task's properties list the parts of the route
+and how each is driven, with the number of waypoints.
+
 **Actions at a point.** A mission is a sequence, so the actions at a point are
 the tasks that follow a Follow route to it. A selected point lists them per
 mission, with **Add action here**.

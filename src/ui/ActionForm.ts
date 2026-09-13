@@ -151,7 +151,9 @@ function paramRow(def: ParamDef, value: unknown, ctx: FormContext, onChange: (v:
   if (def.kind === "event_source") {
     return h("div", { class: "sub-form" }, h("div", { class: "sub-title", text: def.label }), eventSourceForm(isRecord(value) ? (value as EventSource) : newEventSource("ros.topic"), ctx, onChange));
   }
-  return row(def.label, paramControl(def, value, ctx, onChange));
+  const control = row(def.label, paramControl(def, value, ctx, onChange));
+  if (!def.note) return control;
+  return h("div", { class: "param-with-note" }, control, h("p", { class: "prose muted", text: def.note }));
 }
 
 /** One control for one parameter. Shapes without a dedicated editor fall back to JSON. */
@@ -164,6 +166,7 @@ export function paramControl(def: ParamDef, value: unknown, ctx: FormContext, on
       if (def.min !== undefined) inp.min = String(def.min);
       if (def.max !== undefined) inp.max = String(def.max);
       if (def.step !== undefined) inp.step = String(def.step);
+      if (def.placeholder !== undefined) inp.placeholder = def.placeholder;
       inp.addEventListener("change", () => {
         const n = parseFloat(inp.value);
         onChange(Number.isFinite(n) ? (def.kind === "integer" ? Math.round(n) : n) : undefined);

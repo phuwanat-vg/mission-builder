@@ -1558,6 +1558,43 @@ button.list-row.indent {
 .route-chain.bad {
   border-left-color: var(--err);
 }
+button.list-row .pill + .pill {
+  margin-left: 4px;
+}
+.route-segments {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 6px 0 2px;
+}
+.route-segment {
+  display: grid;
+  grid-template-columns: 9.5em 1fr auto;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 12px;
+  padding: 3px 8px;
+  border-left: 3px solid var(--accent);
+}
+.route-segment.follow_path {
+  /* the map's double line for a strict lane */
+  border-left: 4px double var(--accent);
+}
+.route-segment.lead-in {
+  border-left-style: dotted;
+  color: var(--muted);
+}
+.stats.route-summary {
+  white-space: normal;
+}
+.route-segment .seg-mode {
+  font-weight: 500;
+}
+.route-segment .seg-sites {
+  font-family: var(--mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
 .arrival-card {
   border: 1px solid var(--border);
   border-radius: 4px;

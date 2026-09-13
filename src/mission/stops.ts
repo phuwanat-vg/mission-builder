@@ -12,6 +12,7 @@
  */
 
 import type { Mission, Path, Site, Step } from "./types";
+import { DEFAULT_WAYPOINT_SPACING_M, STRICT_PATH_SPACING_M } from "./types";
 import type { Edge } from "./types";
 import { getList, walkSteps } from "./ids";
 import { routeThroughGraph } from "./geometry";
@@ -278,6 +279,93 @@ export function arrivalsAt(missions: readonly Mission[], site: string): Arrival[
       out.push({ mission: mission.name, step: visit.step, path: visit.path, actions });
     }
   }
+  return out;
+}
+
+// ---- how a planned chain is driven ------------------------------------------------
+
+export type RouteSegmentMode = "through_poses" | "follow_path" | "go_to_pose";
+
+/** One Nav2 request of a Follow route, like the runner's result `segments`. */
+export interface RouteSegment {
+  mode: RouteSegmentMode;
+  /** Sites along this part, first to last. */
+  sites: string[];
+  /** Poses sent: waypoints for through_poses / go_to_pose, path poses for follow_path. */
+  poses: number;
+  /** A lead-in to a strict lane's first point, only driven when the robot is not already there. */
+  leadIn?: boolean;
+}
+
+/** The step's `waypoint_spacing_m`, or the default when it is absent or only known at run time. */
+export function waypointSpacing(step: Step): number {
+  const v = step.waypoint_spacing_m;
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : DEFAULT_WAYPOINT_SPACING_M;
+}
+
+/** The lane the robot drives from `a` to `b`: the first open one allowing that direction. */
+export function laneBetween(edges: readonly Edge[], a: string, b: string): Edge | null {
+  for (const e of edges) {
+    if (e.blocked === true) continue;
+    if ((e.from === a && e.to === b) || (e.bidirectional !== false && e.from === b && e.to === a)) return e;
+  }
+  return null;
+}
+
+/** Path poses of one straight piece of a FollowPath path, like the runner's `path_from_points` (end point not counted). */
+function pathSteps(lengthM: number): number {
+  return Math.max(1, Math.trunc(lengthM / Math.max(0.005, STRICT_PATH_SPACING_M)));
+}
+
+/** Poses strictly between the two ends of a normal lane: at spacing, 2 x spacing, ... short of its end (0 = none). */
+export function intermediatePoses(lengthM: number, spacing: number): number {
+  if (spacing <= 0 || lengthM <= 0) return 0;
+  let k = 1;
+  while (k * spacing < lengthM - 1e-6) k++;
+  return k - 1;
+}
+
+/**
+ * How a chain of sites is driven, with the rules mission_runner follows:
+ * consecutive normal lanes are one NavigateThroughPoses with a pose every
+ * `spacing` metres along each lane (a single pose is a NavigateToPose), and
+ * consecutive strict lanes are one FollowPath along the straight lines, with
+ * poses every 0.05 m. A chain that starts with a strict lane first drives to
+ * its first point with NavigateToPose when the robot is not already there
+ * (more than 0.3 m away). With `splitBySpeed` (Apply lane speed limits, and
+ * some lane on the route has a cap) runs are also split where the cap changes.
+ */
+export function routeSegments(route: readonly string[], sites: Record<string, Site>, edges: readonly Edge[], spacing: number, splitBySpeed = false): RouteSegment[] {
+  if (route.length === 0) return [];
+  if (route.length === 1) return [{ mode: "go_to_pose", sites: [route[0]!], poses: 1 }];
+  const hops = route.slice(1).map((b, i) => ({ a: route[i]!, b, lane: laneBetween(edges, route[i]!, b) }));
+  const split = splitBySpeed && hops.some((h) => typeof h.lane?.speed_mps === "number" && h.lane.speed_mps > 0);
+  const runs: { strict: boolean; speed: number | null; sites: string[]; poses: number }[] = [];
+  for (const { a, b, lane } of hops) {
+    const strict = lane?.strict === true;
+    const speed = split && typeof lane?.speed_mps === "number" && lane.speed_mps > 0 ? lane.speed_mps : null;
+    const pa = sites[a];
+    const pb = sites[b];
+    const length = pa && pb ? Math.hypot(pb.x - pa.x, pb.y - pa.y) : 0;
+    const poses = strict ? pathSteps(length) : intermediatePoses(length, spacing) + 1;
+    const last = runs[runs.length - 1];
+    if (last && last.strict === strict && last.speed === speed) {
+      last.sites.push(b);
+      last.poses += poses;
+    } else {
+      runs.push({ strict, speed, sites: [a, b], poses });
+    }
+  }
+  const out: RouteSegment[] = [];
+  runs.forEach((run, i) => {
+    if (run.strict) {
+      if (i === 0) out.push({ mode: "go_to_pose", sites: [run.sites[0]!], poses: 1, leadIn: true });
+      // The path's last pose is the end point itself.
+      out.push({ mode: "follow_path", sites: run.sites, poses: run.poses + 1 });
+    } else {
+      out.push({ mode: run.poses === 1 ? "go_to_pose" : "through_poses", sites: run.sites, poses: run.poses });
+    }
+  });
   return out;
 }
 

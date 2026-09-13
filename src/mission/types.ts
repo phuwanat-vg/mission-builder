@@ -115,8 +115,20 @@ export interface FollowRouteStep extends StepBase {
   through?: string[];
   on_no_route?: "fail" | "direct";
   apply_speed_limits?: boolean;
+  /**
+   * Metres between the extra poses put along each normal lane, facing the
+   * direction of travel. 0 sends only the lanes' points. Default 0.75.
+   */
+  waypoint_spacing_m?: number;
+  /** FollowPath's controller and goal checker on strict lanes; "" is Nav2's default. */
+  controller_id?: string;
+  goal_checker_id?: string;
   behavior_tree?: BehaviorTree;
 }
+
+export const DEFAULT_WAYPOINT_SPACING_M = 0.75;
+/** Pose spacing of the FollowPath path along strict lanes. */
+export const STRICT_PATH_SPACING_M = 0.05;
 export interface FollowPathStep extends StepBase {
   type: "nav.follow_path"; points?: Point[]; path?: unknown; from_robot?: boolean; spacing_m?: number; controller_id?: string; goal_checker_id?: string;
 }
@@ -281,6 +293,11 @@ export interface Edge {
   blocked?: boolean;
   /** Multiplies the length when choosing a route (1 = neutral). */
   cost?: number;
+  /**
+   * Driven exactly along the straight line with FollowPath: no detours, and
+   * the robot stops instead of going around an obstacle. Absent means false.
+   */
+  strict?: boolean;
   notes?: string;
 }
 

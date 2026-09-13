@@ -43,6 +43,8 @@ export interface ParamDef {
   default?: unknown;
   required?: boolean;
   help?: string;
+  /** A sentence shown under the control in the step form. */
+  note?: string;
   advanced?: boolean;
   min?: number;
   max?: number;
@@ -187,6 +189,12 @@ const BLOCKS: BlockDef[] = [
       { key: "from", label: "From", kind: "site", help: "Start site. Defaults to the graph node nearest the robot.", advanced: true },
       { key: "on_no_route", label: "When there is no route", kind: "select", options: ["fail", "direct"], default: "fail", advanced: true },
       { key: "apply_speed_limits", label: "Apply lane speed limits", kind: "boolean", default: false, advanced: true },
+      {
+        key: "waypoint_spacing_m", label: "Waypoint spacing (m)", kind: "number", default: 0.75, min: 0, step: 0.25, placeholder: "0.75", advanced: true,
+        note: "Extra poses every this many metres along each lane, so the planner cannot cut corners between points. Empty is 0.75 m; 0 sends only the lanes' points. Lanes set to 'Drive exactly along this lane' ignore it.",
+      },
+      { key: "controller_id", label: "Controller id (exact lanes)", kind: "string", default: "", placeholder: "FollowPath", advanced: true },
+      { key: "goal_checker_id", label: "Goal checker id (exact lanes)", kind: "string", default: "", placeholder: "goal_checker", advanced: true },
       BT_PARAM,
     ],
     summary: (s) => {

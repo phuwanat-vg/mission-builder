@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+- **Follow route stays on the lanes**: poses are added every
+  **Waypoint spacing (m)** along each lane (`waypoint_spacing_m`, default
+  0.75 m, in the task's *Advanced* section; 0 sends only the lanes' points),
+  facing the direction of travel, so Nav2 cannot cut corners between two
+  points. Between 0 and 0.2 m is a warning (very dense, many waypoints).
+- **Drive exactly along this lane**: a lane option (`strict: true` in
+  `sites/1`) that drives it with FollowPath along the straight line: no
+  detours, and the robot stops instead of going around an obstacle.
+  Consecutive exact lanes are one path; a route that starts on one first
+  drives to its start point when the robot is not there. Exact lanes are drawn
+  as a double line (the route band over them too), and a point's lane list
+  tags them "exact". Undoable, and kept through save, open, import and deploy.
+- **Planned route** in a Follow route's properties lists how it is driven,
+  part by part ("Through poses: Home → A → B", "Exact along lane: B → C"),
+  with the number of waypoints, using mission_runner's rules (its run result
+  reports the same `segments`).
+- **Python export** does the same: extra poses along normal lanes with
+  `goThroughPoses`, `followPath` on a 0.05 m straight path for exact lanes,
+  with a `goToPose` onto the lane first when the robot is not at its start.
+
 ## 0.2.3
 
 - **Smaller robot on the map**: the outline comes from the local costmap's
