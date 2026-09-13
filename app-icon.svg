@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Mission Builder: a mobile robot (AMR) with a lightning bolt. Source for `npx tauri icon app-icon.svg`. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b1f26"/>
+      <stop offset="1" stop-color="#050608"/>
+    </linearGradient>
+    <linearGradient id="bolt" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffe066"/>
+      <stop offset="1" stop-color="#ff9a14"/>
+    </linearGradient>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f4f7fb"/>
+      <stop offset="1" stop-color="#c3ccd8"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="0" y="0" width="1024" height="1024" rx="224" fill="url(#bg)"/>
+
+  <!-- floor -->
+  <rect x="120" y="826" width="784" height="16" rx="8" fill="#2b313b"/>
+
+  <!-- lidar puck on the left of the deck -->
+  <rect x="250" y="440" width="150" height="46" rx="14" fill="#c3ccd8"/>
+  <rect x="270" y="372" width="110" height="80" rx="30" fill="#6cbcff"/>
+  <rect x="270" y="402" width="110" height="16" fill="#3a8fdc"/>
+
+  <!-- flat AMR body -->
+  <rect x="140" y="480" width="744" height="250" rx="70" fill="url(#body)"/>
+  <!-- front sensor strip -->
+  <rect x="190" y="560" width="190" height="30" rx="15" fill="#6cbcff"/>
+  <!-- bumper -->
+  <rect x="140" y="668" width="744" height="62" rx="31" fill="#8f9bab"/>
+
+  <!-- wheels -->
+  <circle cx="290" cy="750" r="68" fill="#0b0d10"/>
+  <circle cx="290" cy="750" r="44" fill="#2f3640"/>
+  <circle cx="290" cy="750" r="16" fill="#6cbcff"/>
+  <circle cx="734" cy="750" r="68" fill="#0b0d10"/>
+  <circle cx="734" cy="750" r="44" fill="#2f3640"/>
+  <circle cx="734" cy="750" r="16" fill="#6cbcff"/>
+
+  <!-- lightning bolt, over the right half -->
+  <path d="M690 130 L470 520 L612 520 L548 880 L812 420 L660 420 Z"
+        fill="url(#bolt)" stroke="#050608" stroke-width="30" stroke-linejoin="round"/>
+</svg>
