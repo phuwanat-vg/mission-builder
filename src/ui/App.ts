@@ -25,6 +25,7 @@ import { requestTopics, topicNote } from "../mission/requestTopics";
 import type { Capabilities } from "../mission/MissionApi";
 import type { Edge, Finding, Mission, Path, Site, SitesDoc, Step } from "../mission/types";
 import { DEFAULT_ANSWER_TOPIC, DEFAULT_REQUEST_TOPIC, MISSION_NAME_RE, MISSION_SCHEMA_ID, SITES_SCHEMA_ID, isRecord } from "../mission/types";
+import { COPYRIGHT } from "../about";
 import { loadSettings, saveSettings } from "../state/settings";
 import type { AppSettings } from "../state/settings";
 import { THEME_LABELS, THEME_NAMES, applyTheme } from "./theme";
@@ -267,7 +268,7 @@ export class App {
     const topbar = h(
       "div",
       { class: "topbar" },
-      h("div", { class: "brand" }, "Mission", h("span", { text: " Builder" })),
+      h("div", { class: "brand" }, h("span", { class: "name", text: "Mission Builder" }), h("span", { class: "copyright", text: COPYRIGHT })),
       fileBtn,
       this.#projectBtn,
       this.#treeToggle,

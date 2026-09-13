@@ -30,6 +30,8 @@
       "msi"
     ],
     "createUpdaterArtifacts": true,
+    "publisher": "phuwanat@SUT IRISH LAB",
+    "copyright": "© 2026 phuwanat@SUT IRISH LAB",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

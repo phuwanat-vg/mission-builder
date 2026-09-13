@@ -94,6 +94,8 @@ export interface DeployHost {
 export function openDeployDialog(host: DeployHost): void {
   const plan = host.plan;
   const replace = h("input", { type: "checkbox" });
+  // On by default: the robot ends up with exactly this project's missions.
+  replace.checked = true;
   const replaceNote = h("p", { class: "prose muted", text: "Missions on the robot that are not in this project are left alone." });
   const content: (Node | string)[] = [
     h("p", {
@@ -113,7 +115,7 @@ export function openDeployDialog(host: DeployHost): void {
   content.push(h("label", { class: "check-row" }, replace, h("span", { text: "Replace missions on the robot" })), replaceNote);
 
   let toDelete: string[] | null = [];
-  replace.addEventListener("change", () => {
+  const showReplace = (): void => {
     if (!replace.checked) {
       toDelete = [];
       replaceNote.textContent = "Missions on the robot that are not in this project are left alone.";
@@ -124,14 +126,19 @@ export function openDeployDialog(host: DeployHost): void {
     void host.robotMissions().then((names) => {
       if (!replace.checked) return;
       if (names === null) {
-        replaceNote.textContent = "The robot's missions could not be read, so what Replace would delete is not known.";
+        // Replace is on by default; never leave it on when what it deletes is unknown.
+        replace.checked = false;
+        toDelete = [];
+        replaceNote.textContent = "The robot's missions could not be read, so Replace was turned off. Missions on the robot that are not in this project are left alone.";
         return;
       }
       toDelete = names.filter((n) => !plan.missions.includes(n));
       replaceNote.textContent =
         toDelete.length === 0 ? "Every mission on the robot is in this project, so nothing is deleted." : `These missions are on the robot but not in this project and will be deleted: ${toDelete.join(", ")}.`;
     });
-  });
+  };
+  replace.addEventListener("change", showReplace);
+  showReplace();
 
   const dialog = openModal({
     title: "Deploy project to robot",

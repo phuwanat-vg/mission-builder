@@ -1,6 +1,15 @@
 # Changelog
 
-## 0.2.0 — unreleased
+## Unreleased
+
+- **Deploy**: "Replace missions on the robot" is ticked by default, and the
+  dialog lists right away what that deletes on the robot.
+- **Top bar** is black in every theme, with white text, brighter secondary text
+  and filled Run / Stop buttons that keep white labels.
+- Copyright **© 2026 phuwanat@SUT IRISH LAB** under the name in the top bar,
+  and as publisher and copyright of the installer.
+
+## 0.2.0
 
 Points, routes, requests and project files, as set out in
 `Mission/docs/mission-builder-v2.md`. Everything is edited in a project that

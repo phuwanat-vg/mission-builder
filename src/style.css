@@ -343,25 +343,68 @@ kbd {
 }
 
 /* ---------- top bar ---------- */
+/* Black in every theme. The bar redefines the palette for its own children, so
+   its buttons, inputs and status text stay readable without rules of their own. */
 .topbar {
+  --panel: #000000;
+  --surface: #16191e;
+  --border: #353b45;
+  --border-2: #59616d;
+  --text: #ffffff;
+  --muted: #cfd5dd;
+  --accent: #6cbcff;
+  --accent-soft: #11304d;
+  --ok: #46d98a;
+  --warn: #ffc24d;
+  --err: #ff6b78;
+  --hover: #23272f;
+  --kbd-bg: #23272f;
+
   grid-area: top;
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 44px;
+  min-height: 46px;
   padding: 6px 12px;
   background: var(--panel);
+  color: var(--text);
   border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+/* The filled Run and Stop keep white text on a deep fill. */
+.topbar button.solid,
+.topbar button.solid svg.icon,
+.topbar button.danger.solid,
+.topbar button.danger.solid svg.icon {
+  color: #ffffff;
+}
+.topbar button.solid {
+  background: #1a6fd4;
+  border-color: #1a6fd4;
+}
+.topbar button.danger.solid {
+  background: #d12c3c;
+  border-color: #d12c3c;
+}
+.topbar button.solid:hover:not(:disabled) {
+  border-color: #ffffff;
 }
 .brand {
-  font-weight: 600;
-  font-size: 14px;
-  color: var(--text);
-  margin-right: 4px;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+  margin-right: 6px;
   white-space: nowrap;
 }
-.brand span {
+.brand .name {
+  font-weight: 700;
+  font-size: 15px;
+  color: var(--text);
+}
+.brand .copyright {
+  font-size: 11px;
   color: var(--muted);
+  letter-spacing: 0.02em;
 }
 .url-input {
   width: 220px;
