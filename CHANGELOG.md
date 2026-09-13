@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.4
 
 - **Follow route stays on the lanes**: poses are added every
   **Waypoint spacing (m)** along each lane (`waypoint_spacing_m`, default
