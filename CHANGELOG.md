@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.3
+
+- **Smaller robot on the map**: the outline comes from the local costmap's
+  footprint first (the global one is often set larger for planning margin),
+  the default body is 0.4 m × 0.3 m, the base_link axes and the halo are
+  shorter and thinner, and the minimum size when zoomed out is 10 px.
+
 ## 0.2.2
 
 - **The robot on the map** is drawn as its footprint (from Nav2's
