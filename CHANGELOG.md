@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.2
+
+- **The robot on the map** is drawn as its footprint (from Nav2's
+  `published_footprint`, global costmap first; a 0.5 m × 0.4 m body until one
+  arrives) with a forward chevron, a white halo and base_link's x / y axes.
+  The other TF frames and their names (laser, livox_frame, ...) are no longer
+  drawn. The robot keeps a readable size when the whole map is in view.
+- **Add a step**: *Wait for something*, *Robot behaviour*, *Call another
+  system*, and MQTT / Modbus / GPIO under *Send a signal* are listed but greyed
+  out ("Not available in this version"). Missions that already use those steps
+  still open, edit and run.
+
 ## 0.2.1
 
 - **Start position (initial pose)**: a point's properties have a *Start

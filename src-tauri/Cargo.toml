@@ -1,6 +1,6 @@
 [package]
 name = "mission-builder"
-version = "0.2.1"
+version = "0.2.2"
 description = "Mission Builder - build and run Nav2 missions without writing code"
 authors = ["phuwanat@SUT IRISH LAB"]
 edition = "2021"
