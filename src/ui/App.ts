@@ -53,6 +53,7 @@ import { hasFileSystem } from "../project/files";
 import { openAddPointDialog } from "./AddPointDialog";
 import { askImportMode, openDeployDialog, openProjectSettings } from "./ProjectDialogs";
 import type { DeployPlan } from "./ProjectDialogs";
+import { openRobotStartup } from "./RobotStartup";
 
 export class App {
   readonly conn = new FoxgloveConnection();
@@ -253,6 +254,8 @@ export class App {
         { label: "-", run: () => undefined },
         { label: "Export as a Python script", icon: "code", run: () => this.#exportPython() },
         { label: "Export as behavior-tree XML", icon: "fileText", run: () => this.#exportBt() },
+        { label: "-", run: () => undefined },
+        { label: "Robot startup…", icon: "power", hint: this.api.autostartReachable ? "" : "Connect first", disabled: !this.api.autostartReachable, run: () => this.#openRobotStartup() },
         { label: "-", run: () => undefined },
         { label: "Theme", icon: "eye", hint: THEME_LABELS[this.settings.theme], run: () => this.#openThemeMenu(rect.left - 180, rect.bottom + 4) },
         { label: "-", run: () => undefined },
@@ -698,6 +701,31 @@ export class App {
     this.refresh();
     this.map.fit();
     this.toast(`${sentence}${oldRobot ? " This robot's mission_runner has no /api/project yet, so they were read one by one." : ""} Ctrl+Z undoes the import.`, "info");
+  }
+
+  /** … menu → Robot startup: the services that start Nav2 and the mission layer at boot. */
+  #openRobotStartup(): void {
+    if (!this.api.autostartReachable) {
+      this.toast(this.api.unavailableReason || "The runner cannot be reached.");
+      return;
+    }
+    const robotKey = this.conn.state === "connected" ? this.#urlInput.value.trim() : "(not connected)";
+    openRobotStartup({
+      api: this.api,
+      toast: (m, k) => this.toast(m, k),
+      projectArg: () => this.settings.startupProject[robotKey] ?? "",
+      rememberProjectArg: (value) => {
+        if (value === "") delete this.settings.startupProject[robotKey];
+        else this.settings.startupProject[robotKey] = value;
+        this.#save();
+      },
+      projectFileName: () => {
+        const path = this.session.path;
+        if (path) return baseName(path).replace(/\.mproj$/i, "") + ".mproj";
+        const slug = this.store.meta.name.toLowerCase().replace(/[^a-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "");
+        return `${slug || "project"}.mproj`;
+      },
+    });
   }
 
   #openDeploy(): void {

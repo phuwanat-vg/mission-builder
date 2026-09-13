@@ -18,7 +18,7 @@ export interface ModalButton {
 
 export interface ModalOptions {
   title: string;
-  size?: "small" | "medium";
+  size?: "small" | "medium" | "large";
   content: (Node | string)[];
   buttons: ModalButton[];
   /** Escape, the backdrop, or a button without `run`. */

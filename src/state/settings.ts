@@ -20,6 +20,8 @@ export interface AppSettings {
   lastProjectPath: string;
   /** Recently opened or saved project files, newest first (desktop only). */
   recentProjects: string[];
+  /** Robot startup: the `project` argument the mission layer last used, per robot address. */
+  startupProject: Record<string, string>;
 }
 
 export const MAX_RECENT_PROJECTS = 8;
@@ -34,6 +36,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   theme: "drafting",
   lastProjectPath: "",
   recentProjects: [],
+  startupProject: {},
 };
 
 /** Put a path at the top of the recent list, without duplicates. */
@@ -45,9 +48,11 @@ export function rememberRecent(settings: AppSettings, path: string): void {
 export function loadSettings(): AppSettings {
   try {
     const raw = localStorage.getItem(KEY);
-    if (!raw) return { ...DEFAULT_SETTINGS };
+    if (!raw) return { ...DEFAULT_SETTINGS, startupProject: {} };
     const parsed = JSON.parse(raw) as Partial<AppSettings>;
     const merged = { ...DEFAULT_SETTINGS, ...parsed };
+    const sp: unknown = merged.startupProject;
+    merged.startupProject = typeof sp === "object" && sp !== null && !Array.isArray(sp) ? { ...(sp as Record<string, string>) } : {};
     // A settings file written by an older version has no theme, or a name this
     // version no longer knows.
     if (!isThemeName(merged.theme)) merged.theme = DEFAULT_SETTINGS.theme;

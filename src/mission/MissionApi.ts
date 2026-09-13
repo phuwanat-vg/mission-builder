@@ -173,6 +173,103 @@ export interface RunnerEvent {
   text?: string;
 }
 
+// ---- autostart (Mission/docs/robot-startup.md, section 4) -------------------
+
+/** What a service launches: a launch file on the robot, or a package's launch file. */
+export type LaunchTarget = { file: string; package?: undefined } | { package: string; file: string };
+
+/** One `mission-autostart-<name>` systemd user service. */
+export interface AutostartService {
+  name: string;
+  unit: string;
+  description: string;
+  launch: LaunchTarget;
+  args: string[];
+  workspaces: string[];
+  ros_domain_id: number | null;
+  rmw: string | null;
+  after: string[];
+  enabled: boolean;
+  active: string;
+  sub_state: string;
+  since: string | null;
+  restarts: number;
+  main_pid: number | null;
+  /** The runner answering this call runs inside this service. */
+  self: boolean;
+}
+
+/** `GET /api/autostart`. */
+export interface AutostartInfo {
+  supported: boolean;
+  reason?: string;
+  enabled: boolean;
+  user: string;
+  linger: boolean;
+  ros_distro: string | null;
+  roots: string[];
+  self?: string | null;
+  services: AutostartService[];
+}
+
+/** `PUT /api/autostart/{name}`. */
+export interface AutostartSpec {
+  description?: string;
+  launch: LaunchTarget;
+  args?: string[];
+  workspaces?: string[];
+  ros_domain_id?: number;
+  rmw?: string;
+  after?: string[];
+  start_now?: boolean;
+}
+
+export interface BrowseEntry {
+  name: string;
+  path: string;
+  kind: "dir" | "file";
+  launch: boolean;
+}
+
+/** `GET /api/autostart/browse`. */
+export interface BrowseResult {
+  path: string;
+  parent: string | null;
+  roots: string[];
+  entries: BrowseEntry[];
+}
+
+/** `POST /api/autostart/linger`. */
+export interface LingerResult {
+  linger: boolean;
+  command?: string;
+}
+
+export type AutostartVerb = "start" | "stop" | "restart";
+
+/** Said when the runner has no `/api/autostart` at all. */
+export const AUTOSTART_MISSING = "Update mission_runner on the robot: this version cannot set up services that start at boot.";
+
+/**
+ * A stand-in for the autostart endpoints, used only by the dev build's fake
+ * robot. It answers like the runner would: an HTTP status and a JSON body.
+ */
+export type AutostartOverride = (method: string, path: string, body: unknown, emit: (ev: RunnerEvent) => void) => Promise<{ status: number; body: unknown }>;
+
+/**
+ * The sentences in a failure: `400 {errors:[str]}` from autostart, the
+ * `{message}` findings of the mission endpoints, or the error itself.
+ */
+export function errorSentences(err: unknown): string[] {
+  if (err instanceof MissionApiError) {
+    const list = (err.errors as unknown[])
+      .map((e) => (typeof e === "string" ? e : isRecord(e) && typeof e.message === "string" ? e.message : ""))
+      .filter((s) => s !== "");
+    return list.length > 0 ? list : [err.message];
+  }
+  return [err instanceof Error ? err.message : String(err)];
+}
+
 /** An error the runner reported, carrying its HTTP status and findings. */
 export class MissionApiError extends Error {
   readonly status: number;
@@ -296,6 +393,13 @@ export class MissionApi {
   }
 
   async #call<T>(method: string, path: string, body?: unknown): Promise<T> {
+    const override = this.#autostartOverride;
+    if (override && path.startsWith("/api/autostart")) {
+      const res = await override(method, path, body, (ev) => {
+        for (const l of this.#eventListeners) l(ev);
+      });
+      return this.#answer<T>(method, path, { ok: res.status < 400, status: res.status, body_json: JSON.stringify(res.body), message: "" });
+    }
     const reason = this.unavailableReason;
     if (reason) throw new MissionApiError(reason, 0);
     let res: ApiResponse;
@@ -308,6 +412,10 @@ export class MissionApi {
     } catch (err) {
       throw new MissionApiError(err instanceof Error ? err.message : String(err), 0);
     }
+    return this.#answer<T>(method, path, res);
+  }
+
+  #answer<T>(method: string, path: string, res: ApiResponse): T {
     const status = Number(res.status) || 0;
     let parsed: unknown = undefined;
     if (typeof res.body_json === "string" && res.body_json !== "") {
@@ -393,6 +501,54 @@ export class MissionApi {
   }
   async answerPrompt(id: string, answer: string): Promise<unknown> {
     return await this.post<unknown>(`/api/prompt/${encodeURIComponent(id)}/answer`, { answer });
+  }
+
+  // ---- autostart ----------------------------------------------------------
+
+  #autostartOverride: AutostartOverride | null = null;
+
+  /** Dev build only: answer the autostart endpoints from memory. */
+  setAutostartOverride(fn: AutostartOverride | null): void {
+    this.#autostartOverride = fn;
+  }
+
+  /** True when the autostart endpoints can be called (connected, or the dev fake). */
+  get autostartReachable(): boolean {
+    return this.#available || this.#autostartOverride !== null;
+  }
+
+  /**
+   * `GET /api/autostart`, doubling as the capability check: a runner that
+   * does not know the endpoint answers 404, reported as {@link AUTOSTART_MISSING}.
+   */
+  async autostart(): Promise<AutostartInfo> {
+    try {
+      const info = await this.get<AutostartInfo>("/api/autostart");
+      if (!isRecord(info)) throw new MissionApiError("GET /api/autostart returned something that is not a listing", 0);
+      return { ...info, services: Array.isArray(info.services) ? info.services : [], roots: Array.isArray(info.roots) ? info.roots : [] };
+    } catch (err) {
+      if (isMissingEndpoint(err)) throw new MissionApiError(AUTOSTART_MISSING, (err as MissionApiError).status);
+      throw err;
+    }
+  }
+  async autostartBrowse(path?: string): Promise<BrowseResult> {
+    return await this.get<BrowseResult>(`/api/autostart/browse${path ? `?path=${encodeURIComponent(path)}` : ""}`);
+  }
+  async putAutostart(name: string, spec: AutostartSpec): Promise<AutostartService> {
+    return await this.put<AutostartService>(`/api/autostart/${encodeURIComponent(name)}`, spec);
+  }
+  async autostartAction(name: string, verb: AutostartVerb): Promise<AutostartService> {
+    return await this.post<AutostartService>(`/api/autostart/${encodeURIComponent(name)}/${verb}`, {});
+  }
+  async removeAutostart(name: string): Promise<{ removed: string; self: boolean }> {
+    return await this.del<{ removed: string; self: boolean }>(`/api/autostart/${encodeURIComponent(name)}`);
+  }
+  async autostartLog(name: string, lines = 200): Promise<string[]> {
+    const res = await this.get<{ lines?: unknown }>(`/api/autostart/${encodeURIComponent(name)}/log?lines=${lines}`);
+    return isRecord(res) && Array.isArray(res.lines) ? res.lines.map(String) : [];
+  }
+  async autostartLinger(): Promise<LingerResult> {
+    return await this.post<LingerResult>("/api/autostart/linger", {});
   }
 
   // ---- internals ----------------------------------------------------------

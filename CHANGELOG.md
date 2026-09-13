@@ -6,6 +6,29 @@ Points, routes, requests and project files, as set out in
 `Mission/docs/mission-builder-v2.md`. Everything is edited in a project that
 opens and saves with no robot connected.
 
+- **Robot startup** (⋯ menu, when connected; `Mission/docs/robot-startup.md`):
+  the systemd user services that start the robot at boot, through
+  mission_runner's `/api/autostart`. A list with each service's state
+  ("Running since 08:02", "Failed, restarted 3 times", "Stopped"), what it
+  launches and what it starts after, and **Start**, **Stop**, **Restart**,
+  **Log** (the last 200 journal lines, with Refresh), **Edit** and **Remove**.
+  **Add service…** takes a name, description, the launch file (with
+  **Browse…**, a file browser on the robot: places, breadcrumbs, folders first,
+  launch files selectable and other files greyed out, and a path you can type)
+  or a package and file, launch arguments as `name := value` rows, workspaces
+  filled from the chosen file's folders, ROS_DOMAIN_ID, RMW, the services to
+  start after and Start now; settings the robot refuses are listed in the
+  dialog. **Add the mission layer** fills in `mission_runner bringup.launch.py`
+  after the first service, with the `project` argument last used on that robot.
+  A banner asks for `sudo loginctl enable-linger <user>` when linger is off,
+  with **Try now** and **Copy command**; another says why when the robot cannot
+  manage services. Stopping, restarting or removing the service Mission
+  Builder is connected through says first that the connection will drop. A
+  runner without the endpoint says "Update mission_runner on the robot". The
+  list refreshes after each change, on `autostart.changed`, and every 5
+  seconds while open. The dev build answers these endpoints from memory with
+  `?fake-robot=1` (left out of release builds).
+
 - **Project files** (`project/1`, `.mproj`): a File menu with New project,
   Open…, Open recent, Save, Save as…, Close and Project settings, on Ctrl+N,
   Ctrl+O, Ctrl+S and Ctrl+Shift+S. The title bar and the top bar show the

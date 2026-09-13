@@ -184,6 +184,55 @@ answers. A project reaches a robot three ways:
 `mission_runner project export <file>` writes a robot's sites and missions to a
 project file, which opens here like any other.
 
+## Robot startup
+
+**⋯ menu → Robot startup** sets up what the robot starts at boot, so Nav2 runs
+in the background with no one logged in and no GUI connected. It needs a
+connection and a mission_runner with `/api/autostart`; an older one says
+"Update mission_runner on the robot". The design is in
+`Mission/docs/robot-startup.md`.
+
+The usual setup is two services, each its own systemd user service of the
+robot's user (no root needed), so Nav2 keeps running when the mission layer
+restarts:
+
+1. **Add service…** for your own robot launch file (drivers, localization,
+   Nav2). **Browse…** opens a file browser *on the robot*: the allowed places
+   (your home folder and `/opt/ros` by default), breadcrumbs, folders first,
+   launch files you can pick and other files greyed out, and a path field you
+   can type into. Workspaces are filled from the folders above the chosen file
+   (every `install/setup.bash`, nearest last) and can be edited; the robot's
+   `/opt/ros/<distro>/setup.bash` is always sourced first. Add launch arguments
+   as `name := value` rows, and set ROS_DOMAIN_ID and the RMW if the robot
+   needs them. The package form (`my_robot` + `robot.launch.py`) works too.
+2. **Add the mission layer**: `mission_runner bringup.launch.py`
+   (mission_runner, foxglove_bridge and the station answer nodes), set to start
+   after the first service, with an optional `project` argument: a `.mproj`
+   file on the robot that is imported every time it starts.
+
+Leave **Start it now** off while the same launch file is still running by hand,
+or the two copies fight over the robot; otherwise reboot, or press **Start** in
+the list. The list shows each service's state ("Running since 08:02", "Failed,
+restarted 3 times", "Stopped"), what it launches and what it waits for, with
+**Start**, **Stop**, **Restart**, **Log** (the last 200 journal lines, with
+Refresh), **Edit** and **Remove**. It refreshes after every change, on the
+runner's `autostart.changed` event, and every 5 seconds while it is open.
+Settings the robot refuses are listed in the dialog.
+
+- **Linger**: user services only start at boot without a login once
+  `sudo loginctl enable-linger <user>` has been run on the robot. A banner
+  says so, with **Try now** (which works when the robot allows it without sudo)
+  and **Copy command**.
+- **The service Mission Builder is connected through** (the mission layer) is
+  marked *This connection*. Stopping, restarting or removing it drops the
+  connection, and the dialog says so before doing it.
+- A runner that cannot manage services (not Linux, or no `systemctl --user`)
+  shows why, and the list is read-only; `autostart.enabled: false` in
+  `runner.yaml` does the same.
+
+On the robot the same thing works without a network:
+`mission_runner autostart list | add | start | stop | restart | remove | log | linger`.
+
 ## Keyboard
 
 | Key | What |
