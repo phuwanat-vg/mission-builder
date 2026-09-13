@@ -20,7 +20,8 @@ import { MissionApi, MissionApiError, isMissingEndpoint } from "../mission/Missi
 import type { ApiFinding, ConnectorState, MissionSummary, Run, RunnerEvent, RunnerStatus } from "../mission/MissionApi";
 import { RouteStore } from "../mission/RouteStore";
 import { assignIds, countSteps, findStep, getList, getStepAt, walkSteps } from "../mission/ids";
-import { validate } from "../mission/validate";
+import { validate, validateSiteTopics } from "../mission/validate";
+import { requestTopics, topicNote } from "../mission/requestTopics";
 import type { Capabilities } from "../mission/MissionApi";
 import type { Edge, Finding, Mission, Path, Site, SitesDoc, Step } from "../mission/types";
 import { DEFAULT_ANSWER_TOPIC, DEFAULT_REQUEST_TOPIC, MISSION_NAME_RE, MISSION_SCHEMA_ID, SITES_SCHEMA_ID, isRecord } from "../mission/types";
@@ -112,7 +113,7 @@ export class App {
       openMission: (name) => this.#openMission(name),
       createMission: () => this.#createMission(),
       deleteMission: (name) => this.#deleteMission(name),
-      prepareStep: (step) => this.#prepareStep(step),
+      requestNote: (step) => this.#requestNote(step),
       exportPython: () => this.#exportPython(),
       exportBt: () => this.#exportBt(),
       findings: () => this.#findings,
@@ -559,12 +560,14 @@ export class App {
     this.refresh();
   }
 
-  /** What a new step takes from the project: the request topics. */
-  #prepareStep(step: Step): void {
-    if (step.type !== "ros.request") return;
-    const s = this.store.meta.settings;
-    step.request_topic = typeof s.request_topic === "string" && s.request_topic !== "" ? s.request_topic : DEFAULT_REQUEST_TOPIC;
-    step.answer_topic = typeof s.answer_topic === "string" && s.answer_topic !== "" ? s.answer_topic : DEFAULT_ANSWER_TOPIC;
+  /**
+   * A request's topics, briefly, when they are not the project's. New steps
+   * carry no topics: they come from the station's point or the project.
+   */
+  #requestNote(step: Step): string {
+    if (step.type !== "ros.request") return "";
+    const defaults = this.formContext();
+    return topicNote(requestTopics(step, this.store.mission, this.store.points, defaults), defaults);
   }
 
   #revealStep(mission: string, stepId: string): void {
@@ -597,7 +600,6 @@ export class App {
       let at = typeof start === "number" ? start + 1 : list.length;
       while (at < list.length && list[at]!.type !== STOP_TYPE) at++;
       const step = stepForChoice(choice, this.store.freshStepId());
-      this.#prepareStep(step);
       this.store.insertStep(listPath, at, step, `Add ${choice.label.toLowerCase()} at ${to}`);
       this.#tree.render();
       this.#tree.reveal(`step:${String(step.id)}`);
@@ -729,6 +731,7 @@ export class App {
       for (const e of result.errors) errors.push(`${mission.name}: ${sentenceCase(e.message)}.`);
       for (const f of routeFindings(mission, store.points, store.lanes)) cautions.push(`${mission.name}: ${sentenceCase(f.message)}.`);
     }
+    for (const f of validateSiteTopics(store.sites)) (f.level === "error" ? errors : cautions).push(`Map ${String(f.path[1])}: ${sentenceCase(f.message)}.`);
     return { maps: store.mapNames.length, missions: store.missionNames, errors, cautions };
   }
 

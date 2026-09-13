@@ -47,8 +47,22 @@ opens and saves with no robot connected.
   the exchange iViz's Dashboard answers. Its form has the question, the answers
   as a list, a default picked from them or typed, the timeout and what happens
   then, the station (defaulting to the last Follow route's point), the topics
-  (new steps take the project's), extra data as key and value rows that may use
+  as optional overrides, extra data as key and value rows that may use
   expressions, and a preview of the request exactly as it is published.
+- **Request and answer topics per station**: a point can carry its own
+  `request_topic` and `answer_topic` (*Questions at this point* in its
+  properties, with **Use /station/<name>/request and /answer** to fill a
+  suggested pair), so each station's screen or node only receives its own
+  questions. Point that station's iViz Dashboard (Settings → Requests/Answers
+  topics) or your node at them. A request picks each topic in turn from the
+  step, then the point it asks at (its station, or the last Follow route's
+  destination), then the project settings. New steps no longer copy the
+  project's topics (steps that already carry them keep them); the form shows the
+  topic in effect and where it comes from, the tree and a point's actions show a
+  request's topic when it is not the project's, and the Python export resolves
+  them the same way. A point's topics are checked (they start with `/` and
+  differ from each other; a lone one is a warning that the other falls back to
+  the project default) and kept through save, import, deploy and `sites.json`.
 - **Python export** emits working `follow_route` (planned on the exported
   lanes) and `ros_request` (publish, then spin until the answer or the timeout)
   instead of a to-do comment.

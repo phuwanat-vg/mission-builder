@@ -132,11 +132,21 @@ exchange iViz's Dashboard answers on `/iviz/request` and `/iviz/answer`, so iViz
 answers it unchanged, and so can any node, PLC adapter or button box that
 echoes the id back. The form edits the question, the answers as a list, the
 default (picked from them or typed), how long to wait and what happens then,
-the station (by default the last Follow route's point), the topics (new steps
-take the project's) and extra data as key and value rows that may use
-expressions, and it shows the request exactly as it is published. With
-*Store the result in* set to `check`, a later If reads
-`check.value.answer == 'Reject'`.
+the station (by default the last Follow route's point), the topics and extra
+data as key and value rows that may use expressions, and it shows the request
+exactly as it is published. With *Store the result in* set to `check`, a later
+If reads `check.value.answer == 'Reject'`.
+
+**One pair of topics per station.** So that each station's screen or node only
+receives its own questions, set the topics on the point: select it and fill
+*Questions at this point*, or press **Use /station/conveyor1/request and
+/answer** for the suggested pair. Then point that station's iViz Dashboard
+(Settings → Requests/Answers topics) or your node at them. A request takes each
+topic from the first of: the step's own topic fields (left empty they are only
+a placeholder), the point it asks at (its station, or where the last Follow
+route ends), and the project settings (`/iviz/request` and `/iviz/answer` by
+default). The form says where each topic comes from, and the tree shows a
+request's topic when it is not the project's.
 
 **Themes.** *Drafting*, a light drawing surface, is the default; *Dark* is the
 original palette. Pick one from the `⋯` menu; it is remembered. Every colour in

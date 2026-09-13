@@ -494,6 +494,38 @@ export function validate(doc: unknown, ctx: ValidateContext = {}): ValidationRes
   return { errors: c.errors, warnings: c.warnings };
 }
 
+/**
+ * The request and answer topics a point may carry. Paths are
+ * `["maps", map, "sites", point, key]`; the messages name the point.
+ */
+export function validateSiteTopics(sites: SitesDoc | null | undefined): Finding[] {
+  const out: Finding[] = [];
+  if (!sites || !isRecord(sites.maps)) return out;
+  for (const [mapName, map] of Object.entries(sites.maps)) {
+    for (const [name, site] of Object.entries(map.sites ?? {})) {
+      if (!isRecord(site)) continue;
+      const base: Path = ["maps", mapName, "sites", name];
+      const req = site.request_topic;
+      const ans = site.answer_topic;
+      for (const [key, value, what] of [["request_topic", req, "request topic"], ["answer_topic", ans, "answer topic"]] as const) {
+        if (value === undefined) continue;
+        if (typeof value !== "string" || !value.startsWith("/")) out.push({ level: "error", path: [...base, key], message: `the ${what} of point ${name} must start with /` });
+      }
+      const hasReq = typeof req === "string" && req !== "";
+      const hasAns = typeof ans === "string" && ans !== "";
+      if (hasReq && hasAns && req === ans) out.push({ level: "error", path: [...base, "answer_topic"], message: `point ${name} needs two different topics for the request and the answer` });
+      else if (hasReq !== hasAns) {
+        out.push({
+          level: "warning",
+          path: [...base, hasReq ? "answer_topic" : "request_topic"],
+          message: `point ${name} has only ${hasReq ? "a request" : "an answer"} topic; its ${hasReq ? "answer" : "request"} topic falls back to the project default`,
+        });
+      }
+    }
+  }
+  return out;
+}
+
 /** Findings grouped by step id (for badges). Findings without a step id go under "". */
 export function findingsByStep(result: ValidationResult): Map<string, Finding[]> {
   const m = new Map<string, Finding[]>();

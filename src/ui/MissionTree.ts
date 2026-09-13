@@ -38,8 +38,8 @@ export interface TreeHost {
   openMission(name: string): void;
   createMission(): void;
   deleteMission(name: string): void;
-  /** Fill in what a new step takes from the project (the request topics). */
-  prepareStep(step: Step, listPath: Path): void;
+  /** For a request's detail line: its topics when they are not the project's, else "". */
+  requestNote(step: Step): string;
   exportPython(): void;
   exportBt(): void;
   /** Validation findings for the open mission. */
@@ -115,7 +115,7 @@ export class MissionTree {
     };
     const summaries = this.#host.missionList();
     const openName = mission?.name ?? "";
-    const openTree = buildTree(mission);
+    const openTree = buildTree(mission, (step) => this.#host.requestNote(step));
     const seen = new Set<string>();
     for (const summary of summaries) {
       seen.add(summary.name);
@@ -278,7 +278,6 @@ export class MissionTree {
     openStepPicker(anchor, `Add a step to ${node.label}`, (choice) => {
       const store = this.#host.store;
       const step = stepForChoice(choice, store.freshStepId());
-      this.#host.prepareStep(step, listPath);
       const added = store.insertStep(listPath, -1, step, `Add ${choice.label.toLowerCase()}`);
       this.render();
       if (added) this.reveal(`step:${String(step.id)}`);

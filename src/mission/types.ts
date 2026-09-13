@@ -241,6 +241,13 @@ export interface Site {
   kind?: SiteKind;
   dock_id?: string;
   dock_type?: string;
+  /**
+   * The topics a `ros.request` asking at this point uses when the step names
+   * none, so each station's screen or node only receives its own questions.
+   * Either one left out falls back to the project's.
+   */
+  request_topic?: string;
+  answer_topic?: string;
   notes?: string;
 }
 

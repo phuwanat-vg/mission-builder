@@ -13,14 +13,18 @@ import { h, row } from "./dom";
 import { icon } from "./icons";
 import type { FormContext } from "./ActionForm";
 import { textInput } from "./ActionForm";
-import type { Step } from "../mission/types";
+import type { Mission, Site, Step } from "../mission/types";
 import { isRecord } from "../mission/types";
+import { requestTopics, topicSourceText } from "../mission/requestTopics";
+import type { EffectiveTopic } from "../mission/requestTopics";
 
 export interface RequestFormContext extends FormContext {
-  /** The mission the step belongs to, for the preview. */
-  missionName: string;
+  /** The mission the step belongs to, for the preview and the station default. */
+  mission: Mission;
   /** Where the robot is when it asks, when no station is given: the last Follow route's destination. */
   stationDefault: string | null;
+  /** The open map's points, whose request and answer topics a station may set. */
+  points: Record<string, Site>;
 }
 
 const TYPED = "typed";
@@ -115,11 +119,16 @@ export function requestForm(step: Step, ctx: RequestFormContext, onChange: (key:
   station.addEventListener("change", () => onChange("station", station.value === "" ? undefined : station.value));
   body.append(row("Station", station));
 
-  // the topics
-  body.append(
-    row("Request topic", textInput(str(step.request_topic), ctx.requestTopic, (v) => onChange("request_topic", v.trim() === "" ? undefined : v.trim()))),
-    row("Answer topic", textInput(str(step.answer_topic), ctx.answerTopic, (v) => onChange("answer_topic", v.trim() === "" ? undefined : v.trim()))),
-  );
+  // the topics: empty uses the station's point, then the project's
+  const topics = requestTopics(step, ctx.mission, ctx.points, ctx);
+  const inherited = requestTopics(step, ctx.mission, ctx.points, ctx, true);
+  const topicRow = (label: string, key: "request_topic" | "answer_topic", own: EffectiveTopic, fallback: EffectiveTopic): HTMLElement => {
+    const input = textInput(str(step[key]), fallback.topic, (v) => onChange(key, v.trim() === "" ? undefined : v.trim()));
+    input.classList.add("mono");
+    const where = own.from === "step" ? `Set on this step. Left empty: ${fallback.topic} (${topicSourceText(fallback).toLowerCase()}).` : topicSourceText(own);
+    return row(label, h("div", { class: "pose-control" }, input, h("span", { class: "field-help", text: where })));
+  };
+  body.append(topicRow("Request topic", "request_topic", topics.request, inherited.request), topicRow("Answer topic", "answer_topic", topics.answer, inherited.answer));
 
   // extra data, key and value rows
   const data = isRecord(step.data) ? step.data : {};
@@ -157,11 +166,11 @@ export function requestForm(step: Step, ctx: RequestFormContext, onChange: (key:
   const where = current !== "" ? current : ctx.stationDefault;
   if (where) request.station = where;
   request.source = "mission_runner";
-  request.mission = ctx.missionName;
+  request.mission = ctx.mission.name;
   request.step_id = str(step.id);
   if (isRecord(step.data)) request.data = step.data;
-  const requestTopic = str(step.request_topic) || ctx.requestTopic;
-  const answerTopic = str(step.answer_topic) || ctx.answerTopic;
+  const requestTopic = topics.request.topic;
+  const answerTopic = topics.answer.topic;
   const out = typeof step.out === "string" && step.out !== "" ? step.out : null;
   body.append(
     h("div", { class: "sub-title", text: `Published on ${requestTopic}` }),

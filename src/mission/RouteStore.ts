@@ -441,6 +441,20 @@ export class RouteStore {
     });
   }
 
+  /** Set or clear (empty or undefined) a point's request or answer topic. */
+  setPointTopics(name: string, patch: { request_topic?: string | undefined; answer_topic?: string | undefined }, label = "Change the point's topics"): void {
+    const site = this.points[name];
+    if (!site) return;
+    this.edit(label, () => {
+      for (const key of ["request_topic", "answer_topic"] as const) {
+        if (!(key in patch)) continue;
+        const v = patch[key]?.trim() ?? "";
+        if (v === "") delete site[key];
+        else site[key] = v;
+      }
+    });
+  }
+
   /** Rename a point and every lane and step of every mission that referenced it. */
   renamePoint(from: string, to: string): string {
     const trimmed = to.trim();

@@ -15,7 +15,7 @@ export interface PythonOptions {
   activeMap?: string | null;
   /** File name shown in the docstring (defaults to `<name>.json`). */
   fileName?: string;
-  /** The project's request and answer topics, used where a step names none. */
+  /** The project's request and answer topics, used where neither the step nor its station's point names one. */
   requestTopic?: string;
   answerTopic?: string;
 }
@@ -145,8 +145,9 @@ function emitAction(g: Gen, step: Step): Emitted {
         `default=${step.default !== undefined && step.default !== "" ? pyValue(step.default) : "None"}`,
         `timeout_s=${timeout}`,
         `on_timeout=${JSON.stringify(step.on_timeout === "fail" ? "fail" : "default")}`,
-        `request_topic=${pyValue(typeof step.request_topic === "string" && step.request_topic !== "" ? step.request_topic : g.requestTopic)}`,
-        `answer_topic=${pyValue(typeof step.answer_topic === "string" && step.answer_topic !== "" ? step.answer_topic : g.answerTopic)}`,
+        // None: the station's point, then the project (resolved in ros_request, like the runner).
+        `request_topic=${typeof step.request_topic === "string" && step.request_topic !== "" ? pyValue(step.request_topic) : "None"}`,
+        `answer_topic=${typeof step.answer_topic === "string" && step.answer_topic !== "" ? pyValue(step.answer_topic) : "None"}`,
         `station=${typeof step.station === "string" && step.station !== "" ? pyValue(step.station) : 'ctx.get("_last_site")'}`,
         `data=${step.data !== undefined ? pyValue(step.data) : "None"}`,
         `step_id=${JSON.stringify(String(step.id ?? ""))}`,
@@ -714,10 +715,15 @@ def follow_route(nav, to, through, start, on_no_route, ctx):
 const REQUEST_HELPERS = `
 
 def ros_request(nav, text, options, default=None, timeout_s=None, on_timeout="default",
-                request_topic="/iviz/request", answer_topic="/iviz/answer", station=None, data=None, step_id=""):
+                request_topic=None, answer_topic=None, station=None, data=None, step_id=""):
     """ros.request: publish a JSON request on request_topic and wait for the answer
     with the same id on answer_topic (both std_msgs/String). iViz's Dashboard
-    answers this exchange, and so can any node that echoes the id back."""
+    answers this exchange, and so can any node that echoes the id back.
+    Each topic the step leaves out comes from the station's point (SITE_TOPICS),
+    then from the project (REQUEST_TOPIC, ANSWER_TOPIC), like mission_runner."""
+    at_site = SITE_TOPICS.get(str(station), {}) if station else {}
+    request_topic = request_topic or at_site.get("request") or REQUEST_TOPIC
+    answer_topic = answer_topic or at_site.get("answer") or ANSWER_TOPIC
     rid = uuid.uuid4().hex[:8]
     answers = []
 
@@ -844,6 +850,20 @@ export function generatePython(mission: Mission, opts: PythonOptions = {}): stri
   parts.push(`CURRENT_MAP = ${activeMap ? JSON.stringify(activeMap) : "None"}`);
   parts.push(`SITES = {${siteEntries.length ? `\n${siteEntries.join("\n")}\n` : ""}}  # from the active map${activeMap ? ` '${activeMap}'` : ""}`);
   parts.push(`MAPS = {${mapEntries.length ? `\n${mapEntries.join("\n")}\n` : ""}}  # map name -> yaml on the robot`);
+  if (g.usesRequest) {
+    const topicEntries: string[] = [];
+    if (sites && activeMap && sites.maps[activeMap]) {
+      for (const [n, s] of Object.entries(sites.maps[activeMap]!.sites ?? {})) {
+        const pair: string[] = [];
+        if (typeof s.request_topic === "string" && s.request_topic !== "") pair.push(`"request": ${JSON.stringify(s.request_topic)}`);
+        if (typeof s.answer_topic === "string" && s.answer_topic !== "") pair.push(`"answer": ${JSON.stringify(s.answer_topic)}`);
+        if (pair.length > 0) topicEntries.push(`    ${JSON.stringify(n)}: {${pair.join(", ")}},`);
+      }
+    }
+    parts.push(`REQUEST_TOPIC = ${JSON.stringify(g.requestTopic)}  # the project's request and answer topics`);
+    parts.push(`ANSWER_TOPIC = ${JSON.stringify(g.answerTopic)}`);
+    parts.push(`SITE_TOPICS = {${topicEntries.length ? `\n${topicEntries.join("\n")}\n` : ""}}  # points of the active map with their own request/answer topics`);
+  }
   if (g.usesRoute) parts.push(`EDGES = [${edgeEntries.length ? `\n${edgeEntries.join("\n")}\n` : ""}]  # lanes of the active map: (from, to, two-way, blocked, cost)`);
   parts.push(HELPERS.trimEnd());
   if (g.usesRoute) parts.push(ROUTE_HELPERS.trimEnd());

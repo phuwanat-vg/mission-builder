@@ -59,6 +59,8 @@ export const BLOCK_GROUPS: readonly BlockGroup[] = ["Navigate", "Behaviors", "Ma
 
 export interface SummaryCtx {
   mission: Mission;
+  /** For `ros.request`: a short note when it does not use the project's topics ("on /station/a/request"), else "". */
+  requestNote?: (step: Step) => string;
 }
 
 export interface BlockDef {
@@ -419,9 +421,9 @@ const BLOCKS: BlockDef[] = [
       { key: "answer_topic", label: "Answer topic", kind: "string", placeholder: "/iviz/answer" },
       { key: "data", label: "Extra data", kind: "json", help: "Extra JSON for the answering node; values may use expressions." },
     ],
-    summary: (s) => {
+    summary: (s, ctx) => {
       const opts = Array.isArray(s.options) && s.options.length > 0 ? `[${s.options.map(String).join(" / ")}]` : "any answer";
-      return summarize(s, valueText(s.text), opts, typeof s.out === "string" ? `→ ${s.out}` : undefined);
+      return summarize(s, valueText(s.text), opts, ctx.requestNote?.(s), typeof s.out === "string" ? `→ ${s.out}` : undefined);
     },
   },
   // ROS

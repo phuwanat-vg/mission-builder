@@ -15,6 +15,7 @@
 import type { Finding, Interrupt, Mission, Path, Step, Trigger } from "./types";
 import type { IconName } from "../ui/icons";
 import { blockDefOrUnknown, stepSummaryShort, stepTitle, triggerIcon, triggerSummary } from "./blocks";
+import type { SummaryCtx } from "./blocks";
 import { pathKey } from "./ids";
 
 export type NodeKind =
@@ -62,9 +63,10 @@ export const SETTINGS_ID = "settings";
 export const FLOW_ID = "flow";
 export const ON_ABORT_ID = "on_abort";
 
-/** The whole mission, as the tree the left column draws. */
-export function buildTree(mission: Mission | null): TreeNode | null {
+/** The whole mission, as the tree the left column draws. `requestNote` adds a request's topics to its detail line when they are not the project's. */
+export function buildTree(mission: Mission | null, requestNote?: (step: Step) => string): TreeNode | null {
   if (!mission) return null;
+  const summary: SummaryCtx = requestNote ? { mission, requestNote } : { mission };
   const triggers = mission.triggers ?? [];
   const interrupts = mission.interrupts ?? [];
   const root: TreeNode = {
@@ -115,7 +117,7 @@ export function buildTree(mission: Mission | null): TreeNode | null {
         enabled: true,
         draggable: false,
         listPath: ["flow"],
-        children: stepNodes(mission, mission.flow ?? [], ["flow"]),
+        children: stepNodes(summary, mission.flow ?? [], ["flow"]),
       },
     ],
   };
@@ -129,7 +131,7 @@ export function buildTree(mission: Mission | null): TreeNode | null {
     enabled: true,
     draggable: false,
     listPath: ["on_abort"],
-    children: stepNodes(mission, onAbort, ["on_abort"]),
+    children: stepNodes(summary, onAbort, ["on_abort"]),
   });
   return root;
 }
@@ -170,8 +172,8 @@ function triggerLabel(t: Trigger): string {
 }
 
 /** The rows for one step list, with their nested levels. */
-function stepNodes(mission: Mission, list: Step[], listPath: Path): TreeNode[] {
-  return list.map((step, i) => stepNode(mission, step, [...listPath, i], i + 1));
+function stepNodes(summary: SummaryCtx, list: Step[], listPath: Path): TreeNode[] {
+  return list.map((step, i) => stepNode(summary, step, [...listPath, i], i + 1));
 }
 
 /**
@@ -184,14 +186,14 @@ function stepKey(step: Step, path: Path): string {
   return typeof step.id === "string" && step.id !== "" ? step.id : `@${pathKey(path)}`;
 }
 
-function stepNode(mission: Mission, step: Step, path: Path, number: number): TreeNode {
+function stepNode(summary: SummaryCtx, step: Step, path: Path, number: number): TreeNode {
   const def = blockDefOrUnknown(step.type);
   const nodeKey = stepKey(step, path);
   const node: TreeNode = {
     id: `step:${nodeKey}`,
     kind: "step",
     label: stepTitle(step),
-    detail: stepSummaryShort(step, { mission }) || def.label,
+    detail: stepSummaryShort(step, summary) || def.label,
     icon: def.icon,
     step,
     path,
@@ -213,7 +215,7 @@ function stepNode(mission: Mission, step: Step, path: Path, number: number): Tre
       enabled: true,
       draggable: false,
       listPath: branchPath,
-      children: Array.isArray(nested) ? stepNodes(mission, nested as Step[], branchPath) : [],
+      children: Array.isArray(nested) ? stepNodes(summary, nested as Step[], branchPath) : [],
     });
   }
   // The steps that run before a retry are this step's own "when it fails".
@@ -229,7 +231,7 @@ function stepNode(mission: Mission, step: Step, path: Path, number: number): Tre
       enabled: true,
       draggable: false,
       listPath: failPath,
-      children: stepNodes(mission, before, failPath),
+      children: stepNodes(summary, before, failPath),
     });
   }
   return node;

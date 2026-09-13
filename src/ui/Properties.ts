@@ -19,10 +19,11 @@ import type { RouteStore } from "../mission/RouteStore";
 import type { Edge, Finding, Mission, Site, Step, Trigger } from "../mission/types";
 import { MISSION_NAME_RE, POLICIES, SITE_KINDS, INPUT_TYPES } from "../mission/types";
 import { blockDefOrUnknown, stepTitle, triggerDef, triggerSummary } from "../mission/blocks";
-import { getStepAt, walkSteps } from "../mission/ids";
+import { getStepAt } from "../mission/ids";
 import { buildTree, findNode } from "../mission/tree";
 import type { TreeNode } from "../mission/tree";
-import { pathToString } from "../mission/validate";
+import { pathToString, validateSiteTopics } from "../mission/validate";
+import { lastRouteSiteBefore, requestTopics, suggestedTopics, topicNote } from "../mission/requestTopics";
 import { arrivalsAt, planForStep } from "../mission/stops";
 import type { Arrival } from "../mission/stops";
 import { hasExpression } from "../mission/expressions";
@@ -294,7 +295,7 @@ export class Properties {
       this.#host.refresh();
     };
     if (step.type === "ros.request") {
-      body.append(requestForm(step, { ...ctx, missionName: mission.name, stationDefault: lastRouteSiteBefore(mission, step) }, onChange));
+      body.append(requestForm(step, { ...ctx, mission, stationDefault: lastRouteSiteBefore(mission, step), points: store.points }, onChange));
     } else {
       body.append(actionForm(step, ctx, onChange));
     }
@@ -429,6 +430,8 @@ export class Properties {
     );
     body.append(h("p", { class: "prose muted", text: "Map frame, metres. Heading 0 is along +x, counter-clockwise positive. Typing moves the point; Ctrl+Z puts it back." }));
 
+    this.#appendPointTopics(body, name, site);
+
     const lanes = store.lanes.map((lane, index) => ({ lane, index })).filter(({ lane }) => lane.from === name || lane.to === name);
     body.append(h("div", { class: "sub-title", text: "Lanes here" }));
     if (lanes.length === 0) body.append(h("p", { class: "prose", text: "No lane reaches this point yet, so nothing can drive to it along the route graph." }));
@@ -459,6 +462,41 @@ export class Properties {
     this.#body.replaceChildren(body);
   }
 
+  /** The request and answer topics an Ask for an answer at this point uses, so each station only receives its own questions. */
+  #appendPointTopics(body: HTMLElement, name: string, site: Site): void {
+    const store = this.#host.store;
+    const ctx = this.#host.formContext();
+    body.append(h("div", { class: "sub-title", text: "Questions at this point" }));
+    const field = (key: "request_topic" | "answer_topic", placeholder: string, label: string): HTMLInputElement => {
+      const input = textInput(site[key] ?? "", placeholder, (v) => {
+        store.setPointTopics(name, { [key]: v }, label);
+        this.#host.refresh();
+      });
+      input.classList.add("mono");
+      return input;
+    };
+    body.append(
+      row("Request topic", field("request_topic", ctx.requestTopic, "Change the point's request topic")),
+      row("Answer topic", field("answer_topic", ctx.answerTopic, "Change the point's answer topic")),
+    );
+    const suggested = suggestedTopics(name);
+    const use = h("button", { title: `${suggested.request} and ${suggested.answer}` }, icon("message"), `Use ${suggested.request} and /answer`);
+    use.addEventListener("click", () => {
+      store.setPointTopics(name, { request_topic: suggested.request, answer_topic: suggested.answer }, "Use the suggested topics");
+      this.#host.refresh();
+    });
+    body.append(h("div", { class: "row" }, use));
+    body.append(
+      h("p", {
+        class: "prose muted",
+        text: "An Ask for an answer at this point publishes on these topics unless the step sets its own; left empty, the project's topics are used. Point this station's iViz Dashboard (Settings → Requests/Answers topics) or your node at them.",
+      }),
+    );
+    const map = store.mapName;
+    const own = validateSiteTopics(store.sites).filter((f) => f.path[1] === map && f.path[3] === name);
+    for (const f of own) body.append(h("div", { class: `finding ${f.level}` }, h("div", { text: `${f.message.charAt(0).toUpperCase()}${f.message.slice(1)}.` })));
+  }
+
   /** The tasks that happen when a mission arrives at this point, per mission. */
   #appendArrivals(body: HTMLElement, name: string): void {
     const store = this.#host.store;
@@ -480,7 +518,9 @@ export class Properties {
       if (list) list.push(a);
       else byMission.set(a.mission, [a]);
     }
+    const ctx = this.#host.formContext();
     for (const [missionName, list] of byMission) {
+      const mission = store.missions.find((m) => m.name === missionName) ?? null;
       const count = list.reduce((n, a) => n + a.actions.length, 0);
       const card = h("div", { class: "arrival-card" });
       card.append(h("div", { class: "arrival-head" }, icon("file"), h("span", { class: "arrival-mission", text: missionName }), h("span", { class: "stats", text: `${count} ${count === 1 ? "action" : "actions"}` })));
@@ -491,7 +531,8 @@ export class Properties {
         card.append(drive);
         for (const action of arrival.actions) {
           const def = blockDefOrUnknown(action.type);
-          const btn = h("button", { class: "list-row indent" }, icon(def.icon), h("span", { text: stepTitle(action) }));
+          const note = action.type === "ros.request" ? topicNote(requestTopics(action, mission, store.points, ctx), ctx) : "";
+          const btn = h("button", { class: "list-row indent" }, icon(def.icon), h("span", { text: stepTitle(action) }), ...(note !== "" ? [h("span", { class: "stats", text: note })] : []));
           btn.addEventListener("click", () => this.#host.revealStep(missionName, String(action.id ?? "")));
           card.append(btn);
         }
@@ -668,15 +709,7 @@ export class Properties {
 
 // ---- helpers ----------------------------------------------------------------
 
-/** The destination of the last Follow route before `step`, in document order. */
-export function lastRouteSiteBefore(mission: Mission, step: Step): string | null {
-  let last: string | null = null;
-  for (const visit of walkSteps(mission)) {
-    if (visit.step === step) break;
-    if (visit.step.type === "nav.follow_route" && typeof visit.step.to === "string" && visit.step.to !== "") last = visit.step.to;
-  }
-  return last;
-}
+export { lastRouteSiteBefore };
 
 export function laneName(lane: Edge): string {
   return `${lane.from} ${lane.bidirectional === false ? "→" : "⇄"} ${lane.to}`;
