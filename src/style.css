@@ -1233,9 +1233,12 @@ button.picker-row {
   border-color: transparent;
   min-height: 28px;
 }
-button.picker-row:hover {
+button.picker-row:hover:not(:disabled) {
   background: var(--hover);
   border-color: transparent;
+}
+.picker-group.disabled {
+  opacity: 0.45;
 }
 .picker-label {
   flex: 1;

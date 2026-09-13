@@ -20,12 +20,16 @@ export interface StepChoice {
   preset?: Record<string, unknown>;
   /** Shown under the label when the choice has a consequence worth knowing. */
   note?: string;
+  /** Listed but greyed out and not pickable. */
+  disabled?: boolean;
 }
 
 export interface StepGroup {
   name: string;
   icon: IconName;
   items: StepChoice[];
+  /** Every entry of the group is listed but greyed out. */
+  disabled?: boolean;
 }
 
 function waitFor(source: EventSource): Record<string, unknown> {
@@ -51,15 +55,16 @@ export const STEP_GROUPS: readonly StepGroup[] = [
     name: "Send a signal",
     icon: "send",
     items: [
-      { label: "MQTT message", type: "mqtt.publish" },
-      { label: "Modbus coil or register", type: "modbus.write" },
-      { label: "GPIO output", type: "gpio.write" },
+      { label: "MQTT message", type: "mqtt.publish", disabled: true },
+      { label: "Modbus coil or register", type: "modbus.write", disabled: true },
+      { label: "GPIO output", type: "gpio.write", disabled: true },
       { label: "ROS topic", type: "ros.publish" },
     ],
   },
   {
     name: "Wait for something",
     icon: "hourglass",
+    disabled: true,
     items: [
       { label: "A delay", type: "wait" },
       { label: "An MQTT message", type: "wait_event", preset: waitFor({ type: "mqtt.subscribe", connector: "", topic: "" }) },
@@ -81,6 +86,7 @@ export const STEP_GROUPS: readonly StepGroup[] = [
   {
     name: "Robot behaviour",
     icon: "bot",
+    disabled: true,
     items: [
       { label: "Spin", type: "nav.spin" },
       { label: "Back up", type: "nav.backup" },
@@ -97,6 +103,7 @@ export const STEP_GROUPS: readonly StepGroup[] = [
   {
     name: "Call another system",
     icon: "globe",
+    disabled: true,
     items: [
       { label: "HTTP request", type: "http.request" },
       { label: "ROS service", type: "ros.call_service" },
@@ -146,17 +153,20 @@ export function openStepPicker(anchor: HTMLElement, title: string, onPick: (choi
     for (const group of STEP_GROUPS) {
       const items = group.items.filter((i) => q === "" || i.label.toLowerCase().includes(q) || i.type.includes(q));
       if (items.length === 0) continue;
-      rows.push(h("div", { class: "picker-group" }, icon(group.icon), h("span", { text: group.name })));
+      rows.push(h("div", { class: `picker-group${group.disabled ? " disabled" : ""}` }, icon(group.icon), h("span", { text: group.name })));
       for (const item of items) {
         const def = blockDefOrUnknown(item.type);
+        const off = group.disabled === true || item.disabled === true;
         const btn = h(
           "button",
-          { class: "picker-row", title: item.note ?? def.help },
+          { class: "picker-row", title: off ? "Not available in this version" : (item.note ?? def.help) },
           icon(def.icon),
           h("span", { class: "picker-label", text: item.label }),
           h("span", { class: "picker-type", text: item.type }),
         );
+        btn.disabled = off;
         btn.addEventListener("click", () => {
+          if (off) return;
           close();
           onPick(item);
         });
