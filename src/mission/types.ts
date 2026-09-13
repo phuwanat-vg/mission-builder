@@ -284,12 +284,25 @@ export interface Edge {
   notes?: string;
 }
 
+/**
+ * Where the robot stands when it is switched on. mission_runner sets AMCL's
+ * initial pose at this point when it starts and the robot is not localized
+ * yet, so Nav2 comes up without anyone clicking 2D Pose Estimate.
+ */
+export interface InitialPose {
+  /** A point of the same map. */
+  site: string;
+  /** Set it when mission_runner starts. Absent means true. */
+  on_start?: boolean;
+}
+
 export interface MapDef {
   file?: string;
   frame?: string;
   sites?: Record<string, Site>;
   edges?: Edge[];
   zones?: Record<string, Zone>;
+  initial_pose?: InitialPose;
 }
 
 export interface SitesDoc {

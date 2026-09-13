@@ -84,6 +84,9 @@ const POINT_RING_PX = 1.25;
 const SELECT_RING_PX = 1.25;
 const SELECT_RING_RADIUS_PX = 10.5;
 const SELECT_DOT_PX = 3;
+/** The start position (initial pose): a second thin ring outside the point and the selection ring. */
+const START_RING_RADIUS_PX = 13.5;
+const START_RING_PX = 1.25;
 /** Where a point's heading tick ends — and so where it is grabbed to turn it. */
 export const HEADING_TIP_PX = 15;
 const HEADING_BASE_PX = 9.5;
@@ -148,6 +151,8 @@ interface LabelStyle {
   /** A tiny outline glyph drawn to the left of the text. */
   glyph?: SiteKind;
   glyphColor?: string;
+  /** The start position: a small filled flag after the name. */
+  start?: boolean;
 }
 
 /**
@@ -373,8 +378,9 @@ export class RouteLayer extends Layer {
       if (list) list.push(i + 1);
       else stopNumbers.set(site, [i + 1]);
     });
+    const startSite = this.#store.initialPose?.site ?? null;
     for (const [name, site] of Object.entries(sites)) {
-      this.#points.push(this.#makePoint(name, site));
+      this.#points.push(this.#makePoint(name, site, name === startSite));
     }
 
     // labels: plain text with a halo, the kind as a glyph, stops in a badge
@@ -387,8 +393,8 @@ export class RouteLayer extends Layer {
         name,
         site.x,
         site.y,
-        { color: c.text, halo: c.labelHalo, haloWidth: c.labelHaloWidth, size: LABEL_PX, glyph: kind, glyphColor: c.muted },
-        nums ? 100 : kind === "waypoint" ? 10 : 40,
+        { color: c.text, halo: c.labelHalo, haloWidth: c.labelHaloWidth, size: LABEL_PX, glyph: kind, glyphColor: c.muted, ...(name === startSite ? { start: true } : {}) },
+        nums ? 100 : name === startSite ? 60 : kind === "waypoint" ? 10 : 40,
         { offsetRight: true },
       );
       if (nums) {
@@ -413,7 +419,7 @@ export class RouteLayer extends Layer {
    * scaled by metres-per-pixel every frame, so the circle stays the same size
    * on screen at every zoom.
    */
-  #makePoint(name: string, site: Site): PointVisual {
+  #makePoint(name: string, site: Site, isStart: boolean): PointVisual {
     const c = this.#colors;
     const fill = new Mesh(new CircleGeometry(POINT_PX, 32), flatMaterial(c.surface));
     fill.position.z = Z_DISC;
@@ -437,6 +443,17 @@ export class RouteLayer extends Layer {
     const group = new Group();
     group.position.set(site.x, site.y, 0);
     group.add(halo, fill, ring, dot, heading);
+    if (isStart) {
+      // A double circle: the drafting mark for a datum, where everything starts.
+      // Under it, the label halo, so the ring reads over a floor plan in either theme.
+      const under = new Mesh(new RingGeometry(START_RING_RADIUS_PX - START_RING_PX - 1.25, START_RING_RADIUS_PX + 1.25, 48), flatMaterial(c.labelHalo));
+      under.position.z = Z_HALO - 0.001;
+      under.renderOrder = 10;
+      const start = new Mesh(new RingGeometry(START_RING_RADIUS_PX - START_RING_PX, START_RING_RADIUS_PX, 48), flatMaterial(c.text));
+      start.position.z = Z_HALO;
+      start.renderOrder = 11;
+      group.add(under, start);
+    }
     this.#pointsGroup.add(group);
     return { group, fill, ring, halo, dot, heading, name };
   }
@@ -771,11 +788,13 @@ function textTexture(text: string, style: LabelStyle): TextTexture {
   const padY = badge ? 3 : Math.ceil(halo) + 1;
   const glyphW = style.glyph ? fontPx : 0;
   const glyphGap = style.glyph ? 4 : 0;
+  const flagW = style.start ? fontPx * 0.8 : 0;
+  const flagGap = style.start ? 3 : 0;
   const font = `${style.bold === true ? "600 " : ""}${fontPx}px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif`;
   const measure = document.createElement("canvas").getContext("2d");
   if (measure) measure.font = font;
   const textW = measure ? measure.measureText(text).width : text.length * fontPx * 0.6;
-  const widthPx = Math.ceil(textW + glyphW + glyphGap + padX * 2);
+  const widthPx = Math.ceil(textW + glyphW + glyphGap + flagGap + flagW + padX * 2);
   const heightPx = fontPx + padY * 2;
   const canvas = document.createElement("canvas");
   canvas.width = Math.max(1, Math.ceil(widthPx * dpr));
@@ -807,6 +826,7 @@ function textTexture(text: string, style: LabelStyle): TextTexture {
     }
     ctx.fillStyle = style.color;
     ctx.fillText(text, textX, textY);
+    if (style.start) drawStartFlag(ctx, textX + textW + flagGap, heightPx / 2, flagW, style.color, style.halo, style.haloWidth);
   }
   const texture = new CanvasTexture(canvas);
   texture.minFilter = LinearFilter;
@@ -858,6 +878,42 @@ function drawKindGlyph(ctx: CanvasRenderingContext2D, kind: SiteKind, x: number,
       break;
   }
   ctx.stroke();
+  ctx.restore();
+}
+
+/** The start position's mark in a label: a small filled flag on a pole, in the text colour with the halo behind it. */
+function drawStartFlag(ctx: CanvasRenderingContext2D, x: number, cy: number, box: number, color: string, halo: string, haloWidth: number): void {
+  const top = cy - box * 0.62;
+  const bottom = cy + box * 0.62;
+  const pole = x + box * 0.12;
+  const trace = (): void => {
+    ctx.beginPath();
+    ctx.moveTo(pole, bottom);
+    ctx.lineTo(pole, top);
+    ctx.lineTo(x + box, top + box * 0.3);
+    ctx.lineTo(pole, top + box * 0.6);
+  };
+  ctx.save();
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  if (haloWidth > 0) {
+    trace();
+    ctx.closePath();
+    ctx.strokeStyle = halo;
+    ctx.lineWidth = haloWidth + 1;
+    ctx.stroke();
+  }
+  trace();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.2;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(pole, top);
+  ctx.lineTo(x + box, top + box * 0.3);
+  ctx.lineTo(pole, top + box * 0.6);
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
   ctx.restore();
 }
 

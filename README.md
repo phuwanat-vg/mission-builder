@@ -148,6 +148,18 @@ route ends), and the project settings (`/iviz/request` and `/iviz/answer` by
 default). The form says where each topic comes from, and the tree shows a
 request's topic when it is not the project's.
 
+**Start position (initial pose).** A robot switched on with AMCL but no
+initial pose often fails to bring up Nav2's global costmap until someone clicks
+2D Pose Estimate. Select the point the robot is parked at when it is switched
+on (usually Home) and tick **Robot starts here (initial pose)** under *Start
+position*; each map has one, drawn with a second ring and a small flag, and the
+Maps tab says which it is. With **Set it when the robot starts** on, the map
+carries `"initial_pose": {"site": "Home", "on_start": true}` and mission_runner
+sets AMCL's pose there at start-up whenever the robot is not localized yet.
+**Set robot pose here now** (when connected and nothing is running) asks first,
+then sets the pose at that point immediately; the robot must really be standing
+there. The Activity log shows each attempt, from start-up or from here.
+
 **Themes.** *Drafting*, a light drawing surface, is the default; *Dark* is the
 original palette. Pick one from the `⋯` menu; it is remembered. Every colour in
 the application is a CSS variable selected by `data-theme` on the root element,

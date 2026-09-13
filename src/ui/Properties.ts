@@ -22,7 +22,7 @@ import { blockDefOrUnknown, stepTitle, triggerDef, triggerSummary } from "../mis
 import { getStepAt } from "../mission/ids";
 import { buildTree, findNode } from "../mission/tree";
 import type { TreeNode } from "../mission/tree";
-import { pathToString, validateSiteTopics } from "../mission/validate";
+import { pathToString, validateInitialPoses, validateSiteTopics } from "../mission/validate";
 import { lastRouteSiteBefore, requestTopics, suggestedTopics, topicNote } from "../mission/requestTopics";
 import { arrivalsAt, planForStep } from "../mission/stops";
 import type { Arrival } from "../mission/stops";
@@ -44,6 +44,10 @@ export interface PropertiesHost {
   addActionAt(arrival: Arrival, anchor: HTMLElement): void;
   /** Append a Follow route to a point to the open mission's tasks. */
   addFollowRouteTo(point: string): void;
+  /** Whether "Set robot pose here now" can be pressed, and the sentence saying why not. */
+  robotPoseNow(): { enabled: boolean; reason: string };
+  /** Ask, then tell the robot's localization that it stands at this point now. */
+  setRobotPoseAt(point: string): void;
 }
 
 export class Properties {
@@ -430,6 +434,7 @@ export class Properties {
     );
     body.append(h("p", { class: "prose muted", text: "Map frame, metres. Heading 0 is along +x, counter-clockwise positive. Typing moves the point; Ctrl+Z puts it back." }));
 
+    this.#appendStartPosition(body, name, site);
     this.#appendPointTopics(body, name, site);
 
     const lanes = store.lanes.map((lane, index) => ({ lane, index })).filter(({ lane }) => lane.from === name || lane.to === name);
@@ -460,6 +465,74 @@ export class Properties {
     });
     body.append(h("div", { class: "row buttons" }, focus, del));
     this.#body.replaceChildren(body);
+  }
+
+  /**
+   * The map's start position (its `initial_pose`): whether the robot starts
+   * at this point, whether mission_runner sets it on start, and a button that
+   * sets the robot's pose here right now.
+   */
+  #appendStartPosition(body: HTMLElement, name: string, site: Site): void {
+    const store = this.#host.store;
+    const start = store.initialPose;
+    const isStart = start?.site === name;
+    body.append(h("div", { class: "sub-title", text: "Start position" }));
+
+    const here = h("input", { type: "checkbox" });
+    here.checked = isStart;
+    here.addEventListener("change", () => {
+      if (here.checked) {
+        const from = store.setInitialPose(name);
+        this.#host.toast(from !== null ? `The start position moved from ${from} to ${name}.` : `${name} is where the robot starts on ${store.mapName} now.`, "info");
+      } else {
+        store.setInitialPose(null);
+      }
+      this.#host.refresh();
+    });
+    body.append(h("label", { class: "check-row start-check" }, here, h("span", { text: "Robot starts here (initial pose)" })));
+
+    if (isStart) {
+      const onStart = h("input", { type: "checkbox" });
+      onStart.checked = start.on_start !== false;
+      onStart.addEventListener("change", () => {
+        store.setInitialPoseOnStart(onStart.checked);
+        this.#host.refresh();
+      });
+      body.append(h("label", { class: "check-row start-check sub" }, onStart, h("span", { text: "Set it when the robot starts" })));
+      body.append(
+        h("p", {
+          class: "prose muted",
+          text:
+            start.on_start !== false
+              ? "When mission_runner starts and the robot is not localized yet, it sets AMCL's initial pose here, so Nav2 comes up without anyone clicking 2D Pose Estimate."
+              : "mission_runner leaves localization alone when it starts. Set the pose with the button below instead.",
+        }),
+      );
+    } else if (start && store.points[start.site]) {
+      body.append(h("p", { class: "prose muted", text: `This map's robot starts at ${start.site}. Ticking this moves the start position here.` }));
+    } else if ((site.kind ?? "waypoint") === "home" && !start) {
+      const use = h("button", {}, icon("home"), "Use as start position");
+      use.addEventListener("click", () => {
+        store.setInitialPose(name);
+        this.#host.toast(`${name} is where the robot starts on ${store.mapName} now.`, "info");
+        this.#host.refresh();
+      });
+      body.append(h("div", { class: "start-hint" }, h("span", { text: "This is a home point and this map has no start position yet." }), use));
+    }
+
+    const action = this.#host.robotPoseNow();
+    const now = h("button", { title: action.enabled ? `Tell localization the robot is at ${name} now` : action.reason }, icon("poseEstimate"), "Set robot pose here now");
+    now.disabled = !action.enabled;
+    now.addEventListener("click", () => this.#host.setRobotPoseAt(name));
+    body.append(h("div", { class: "row" }, now));
+    if (!action.enabled && action.reason !== "") body.append(h("p", { class: "prose muted", text: action.reason }));
+    const facing = typeof site.yaw_deg === "number" ? `facing ${Math.round(site.yaw_deg)}°` : "facing along +x (this point has no heading, so 0° is used)";
+    body.append(h("p", { class: "prose muted", text: `The robot must really be standing at ${name}, ${facing}, when its pose is set here. A wrong pose makes Nav2 plan from the wrong place.` }));
+
+    const map = store.mapName;
+    for (const f of validateInitialPoses(store.sites).filter((x) => x.path[1] === map)) {
+      body.append(h("div", { class: `finding ${f.level}` }, h("div", { text: `${f.message.charAt(0).toUpperCase()}${f.message.slice(1)}.` })));
+    }
   }
 
   /** The request and answer topics an Ask for an answer at this point uses, so each station only receives its own questions. */

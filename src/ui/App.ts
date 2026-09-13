@@ -16,11 +16,11 @@
 
 import { FoxgloveConnection } from "../net/FoxgloveConnection";
 import type { ConnectionState } from "../net/FoxgloveConnection";
-import { MissionApi, MissionApiError, isMissingEndpoint } from "../mission/MissionApi";
+import { INITIAL_POSE_MISSING, MissionApi, MissionApiError, errorSentences, isMissingEndpoint } from "../mission/MissionApi";
 import type { ApiFinding, ConnectorState, MissionSummary, Run, RunnerEvent, RunnerStatus } from "../mission/MissionApi";
 import { RouteStore } from "../mission/RouteStore";
 import { assignIds, countSteps, findStep, getList, getStepAt, walkSteps } from "../mission/ids";
-import { validate, validateSiteTopics } from "../mission/validate";
+import { validate, validateInitialPoses, validateSiteTopics } from "../mission/validate";
 import { requestTopics, topicNote } from "../mission/requestTopics";
 import type { Capabilities } from "../mission/MissionApi";
 import type { Edge, Finding, Mission, Path, Site, SitesDoc, Step } from "../mission/types";
@@ -55,6 +55,7 @@ import { openAddPointDialog } from "./AddPointDialog";
 import { askImportMode, openDeployDialog, openProjectSettings } from "./ProjectDialogs";
 import type { DeployPlan } from "./ProjectDialogs";
 import { openRobotStartup } from "./RobotStartup";
+import { choose } from "./modal";
 
 export class App {
   readonly conn = new FoxgloveConnection();
@@ -134,6 +135,8 @@ export class App {
       revealStep: (mission, stepId) => this.#revealStep(mission, stepId),
       addActionAt: (arrival, anchor) => this.#addActionAt(arrival, anchor),
       addFollowRouteTo: (point) => this.#addFollowRouteTo(point),
+      robotPoseNow: () => this.#robotPoseNow(),
+      setRobotPoseAt: (point) => void this.#setRobotPoseAt(point),
     });
     this.#maps = new MapsPanel({
       store: this.store,
@@ -760,7 +763,7 @@ export class App {
       for (const e of result.errors) errors.push(`${mission.name}: ${sentenceCase(e.message)}.`);
       for (const f of routeFindings(mission, store.points, store.lanes)) cautions.push(`${mission.name}: ${sentenceCase(f.message)}.`);
     }
-    for (const f of validateSiteTopics(store.sites)) (f.level === "error" ? errors : cautions).push(`Map ${String(f.path[1])}: ${sentenceCase(f.message)}.`);
+    for (const f of [...validateSiteTopics(store.sites), ...validateInitialPoses(store.sites)]) (f.level === "error" ? errors : cautions).push(`Map ${String(f.path[1])}: ${sentenceCase(f.message)}.`);
     return { maps: store.mapNames.length, missions: store.missionNames, errors, cautions };
   }
 
@@ -992,7 +995,10 @@ export class App {
   // ---- live state ---------------------------------------------------------
 
   #onStatus(status: RunnerStatus): void {
+    const was = this.#status?.state;
     this.#status = status;
+    // "Set robot pose here now" is off while a mission runs.
+    if (was !== status.state && this.settings.rightTab === "selection") this.#props.render();
     this.#activity.setStatus(status);
     this.#renderRunnerState();
     this.#syncButtons();
@@ -1028,6 +1034,65 @@ export class App {
       this.#tree.render();
     }
     if (ev.type === "missions.changed") void this.#refreshMissionList();
+  }
+
+  // ---- initial pose -------------------------------------------------------
+
+  #robotPoseNow(): { enabled: boolean; reason: string } {
+    if (!this.api.autostartReachable) return { enabled: false, reason: "Connect to a robot to set its pose from here." };
+    const state = this.#status?.state;
+    if (state === "running" || state === "paused") return { enabled: false, reason: "A mission is running. Stop it before setting the robot's pose." };
+    return { enabled: true, reason: "" };
+  }
+
+  /**
+   * Ask, then `POST /api/robot/initial_pose`. The point's name is sent when
+   * the robot is known to have this project on this map; otherwise its
+   * coordinates, so what is set is what the user sees.
+   */
+  async #setRobotPoseAt(name: string): Promise<void> {
+    const action = this.#robotPoseNow();
+    if (!action.enabled) {
+      this.toast(action.reason);
+      return;
+    }
+    const site = this.store.points[name];
+    if (!site) return;
+    const yaw = site.yaw_deg ?? 0;
+    const robotMap = this.#status?.current_map ?? null;
+    const inSync = this.#deployedKey !== null && this.#deployedKey === this.store.robotKey() && (robotMap ?? this.store.sites.default_map) === this.store.mapName;
+    const sentences = [
+      `This tells the robot's localization that the robot is standing at ${name} (x ${site.x.toFixed(2)} m, y ${site.y.toFixed(2)} m, heading ${Math.round(yaw)}°) right now.`,
+      "Only do this when the robot really is there, facing that way. A wrong pose makes Nav2 plan and drive from the wrong place.",
+    ];
+    if (!inSync) sentences.push("The robot may not have this project's latest points, so these coordinates are sent rather than the point's name.");
+    if (robotMap && robotMap !== this.store.mapName) sentences.push(`The robot has the map ${robotMap} loaded, not ${this.store.mapName}.`);
+    const answer = await choose(`Set the robot's pose at ${name}?`, sentences, [
+      { value: "cancel", label: "Cancel" },
+      { value: "set", label: "Set pose", kind: "primary" },
+    ]);
+    if (answer !== "set") return;
+    this.toast(`Setting the robot's pose at ${name}…`, "info");
+    try {
+      const res = await this.api.setInitialPose(inSync ? { site: name } : { x: site.x, y: site.y, yaw_deg: yaw });
+      const x = typeof res?.x === "number" ? res.x : site.x;
+      const y = typeof res?.y === "number" ? res.y : site.y;
+      const heading = typeof res?.yaw_deg === "number" ? res.yaw_deg : yaw;
+      this.toast(`Initial pose set at ${res?.site ?? name} (x ${x.toFixed(2)}, y ${y.toFixed(2)}, ${Math.round(heading)}°). Localization confirmed it.`, "info");
+    } catch (err) {
+      this.toast(this.#initialPoseError(err, name));
+    }
+  }
+
+  #initialPoseError(err: unknown, name: string): string {
+    if (err instanceof MissionApiError) {
+      const detail = err.message.trim().replace(/\.$/, "");
+      if (err.message === INITIAL_POSE_MISSING) return INITIAL_POSE_MISSING;
+      if (err.status === 409) return `A mission is running, so the pose was not set. Stop it first, then set the pose at ${name}.`;
+      if (err.status === 400) return `The robot refused the pose at ${name}: ${errorSentences(err).map((s) => s.trim().replace(/\.$/, "")).join("; ")}.`;
+      if (err.status === 500 || err.status === 504) return `The pose at ${name} was sent, but localization did not confirm it: ${detail}.`;
+    }
+    return this.#reason(err, `The pose at ${name} could not be set`);
   }
 
   // ---- run, pause, stop ---------------------------------------------------
@@ -1363,6 +1428,8 @@ function mergeContent(sites: SitesDoc, missions: Mission[], robotSites: SitesDoc
       own.zones ??= {};
       if (!own.zones[z]) own.zones[z] = zone;
     }
+    // The project's start position wins; the robot's is taken when the project has none.
+    if (!own.initial_pose && robotMap.initial_pose && own.sites[robotMap.initial_pose.site]) own.initial_pose = robotMap.initial_pose;
   }
   if (!sites.default_map && robotSites.default_map) sites.default_map = robotSites.default_map;
   const added: string[] = [];

@@ -1031,6 +1031,31 @@ button.list-row {
   color: var(--muted);
   padding-top: 3px;
 }
+.map-start.bad {
+  color: var(--err);
+}
+/* the point's Start position section */
+.start-check {
+  padding: 5px 0;
+  font-weight: 400;
+}
+.start-check.sub {
+  padding-left: 22px;
+}
+.start-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 6px 0 6px 9px;
+  margin: 4px 0;
+  border-left: 2px solid var(--accent);
+}
+.start-hint span {
+  flex: 1 1 160px;
+}
 .map-file {
   font-family: var(--mono);
   font-size: 10px;

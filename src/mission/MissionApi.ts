@@ -171,7 +171,30 @@ export interface RunnerEvent {
   t?: string;
   level?: string;
   text?: string;
+  // robot.initial_pose
+  site?: string;
+  x?: number;
+  y?: number;
+  yaw_deg?: number;
+  source?: "start" | "api" | "step" | string;
+  ok?: boolean;
+  message?: string;
 }
+
+/** `POST /api/robot/initial_pose`: a point of the robot's active map, or coordinates. */
+export type InitialPoseRequest = { site: string } | { x: number; y: number; yaw_deg: number };
+
+/** The answer once localization has confirmed the pose. */
+export interface InitialPoseResult {
+  ok: boolean;
+  site?: string;
+  x: number;
+  y: number;
+  yaw_deg: number;
+}
+
+/** Said when the runner has no `/api/robot/initial_pose`. */
+export const INITIAL_POSE_MISSING = "Update mission_runner on the robot: this version cannot set the robot's pose.";
 
 // ---- autostart (Mission/docs/robot-startup.md, section 4) -------------------
 
@@ -394,7 +417,7 @@ export class MissionApi {
 
   async #call<T>(method: string, path: string, body?: unknown): Promise<T> {
     const override = this.#autostartOverride;
-    if (override && path.startsWith("/api/autostart")) {
+    if (override && (path.startsWith("/api/autostart") || path.startsWith("/api/robot/initial_pose"))) {
       const res = await override(method, path, body, (ev) => {
         for (const l of this.#eventListeners) l(ev);
       });
@@ -475,6 +498,19 @@ export class MissionApi {
   async robotPose(): Promise<{ x: number; y: number; yaw_deg: number; frame?: string }> {
     return await this.get("/api/robot/pose");
   }
+  /**
+   * Tell localization where the robot is standing right now. Resolves once
+   * the runner has seen localization take it; a runner without the endpoint
+   * is reported as {@link INITIAL_POSE_MISSING} (status kept).
+   */
+  async setInitialPose(body: InitialPoseRequest): Promise<InitialPoseResult> {
+    try {
+      return await this.post<InitialPoseResult>("/api/robot/initial_pose", body);
+    } catch (err) {
+      if (isMissingEndpoint(err)) throw new MissionApiError(INITIAL_POSE_MISSING, (err as MissionApiError).status);
+      throw err;
+    }
+  }
   async connectors(): Promise<Record<string, ConnectorState>> {
     const c = await this.get<Record<string, ConnectorState>>("/api/connectors");
     return isRecord(c) ? c : {};
@@ -507,7 +543,12 @@ export class MissionApi {
 
   #autostartOverride: AutostartOverride | null = null;
 
-  /** Dev build only: answer the autostart endpoints from memory. */
+  /** Dev build only: hand listeners an event as if `/mission/event` had carried it. */
+  emitLocal(ev: RunnerEvent): void {
+    for (const l of this.#eventListeners) l(ev);
+  }
+
+  /** Dev build only: answer the autostart (and initial pose) endpoints from memory. */
   setAutostartOverride(fn: AutostartOverride | null): void {
     this.#autostartOverride = fn;
   }

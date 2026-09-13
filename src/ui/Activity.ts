@@ -218,6 +218,26 @@ function duration(run: Run): string {
   return ` after ${s < 60 ? `${s.toFixed(s < 10 ? 1 : 0)} s` : `${Math.round(s / 60)} min`}`;
 }
 
+/**
+ * `robot.initial_pose`: "Initial pose set at Home", "... failed: ...", or
+ * skipped when the runner says the robot was already localized.
+ */
+function describeInitialPose(ev: RunnerEvent): { level: Entry["level"]; text: string } {
+  const where =
+    typeof ev.site === "string" && ev.site !== ""
+      ? ev.site
+      : typeof ev.x === "number" && typeof ev.y === "number"
+        ? `(${ev.x.toFixed(2)}, ${ev.y.toFixed(2)}${typeof ev.yaw_deg === "number" ? `, ${Math.round(ev.yaw_deg)}°` : ""})`
+        : "the start position";
+  const when = ev.source === "start" ? " when mission_runner started" : ev.source === "step" ? " by a mission step" : "";
+  const message = typeof ev.message === "string" ? ev.message.trim().replace(/\.$/, "") : "";
+  if (message !== "" && /already localized|skipp/i.test(message)) {
+    return { level: "info", text: `Initial pose at ${where} skipped${when}: ${message}.` };
+  }
+  if (ev.ok === false) return { level: "error", text: `Initial pose at ${where} failed${when}: ${message || "no reason given"}.` };
+  return { level: "ok", text: `Initial pose set at ${where}${when}${message ? ` (${message})` : ""}.` };
+}
+
 /** One readable sentence for a runner event, or null for the noisy ones. */
 function describe(ev: RunnerEvent): { level: Entry["level"]; text: string } | null {
   switch (ev.type) {
@@ -248,6 +268,8 @@ function describe(ev: RunnerEvent): { level: Entry["level"]; text: string } | nu
       return { level: "info", text: "The missions on the robot changed." };
     case "sites.changed":
       return { level: "info", text: "The map data on the robot changed." };
+    case "robot.initial_pose":
+      return describeInitialPose(ev);
     default:
       return null;
   }

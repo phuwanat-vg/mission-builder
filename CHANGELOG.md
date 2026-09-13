@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **Start position (initial pose)**: a point's properties have a *Start
+  position* section. **Robot starts here (initial pose)** makes it the map's
+  start position (one per map; ticking it on another point moves it and says
+  so), saved as `initial_pose: {site, on_start}` on the map in `sites/1`, and
+  **Set it when the robot starts** lets mission_runner set AMCL's initial pose
+  there at start-up when the robot is not localized yet, so Nav2's costmaps
+  come up without clicking 2D Pose Estimate. **Set robot pose here now** asks
+  first, then sends `POST /api/robot/initial_pose` and shows the answer (a
+  running mission, a pose localization did not confirm, and an older runner
+  are each said in a sentence). The start point is drawn with a second ring
+  and a small flag, the Maps tab says which point each map starts at, the
+  Activity log reads `robot.initial_pose` events ("Initial pose set at Home"),
+  and a home point on a map with no start position offers to become it.
+  Renaming the point follows it, deleting it clears it (undoable), and a start
+  position naming a missing point is a problem that stops Deploy.
 - **Deploy**: "Replace missions on the robot" is ticked by default, and the
   dialog lists right away what that deletes on the robot.
 - **Top bar** is black in every theme, with white text, brighter secondary text

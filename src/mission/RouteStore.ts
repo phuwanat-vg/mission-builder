@@ -17,7 +17,7 @@
  * the tree cannot express is left untouched in the JSON.
  */
 
-import type { Edge, Interrupt, Mission, Path, Site, SiteKind, SitesDoc, Step, Trigger } from "./types";
+import type { Edge, InitialPose, Interrupt, Mission, Path, Site, SiteKind, SitesDoc, Step, Trigger } from "./types";
 import { SITES_SCHEMA_ID, isRecord } from "./types";
 import { allStepIds, assignIds, cloneStepWithFreshIds, deepClone, ensureList, genId, getList, getStepAt, walkSteps } from "./ids";
 import { round1, round3, uniqueSiteName } from "./geometry";
@@ -441,6 +441,46 @@ export class RouteStore {
     });
   }
 
+  /** The point of the edited map the robot starts at (its initial pose), or null. */
+  get initialPose(): InitialPose | null {
+    const pose = this.#sites.maps?.[this.#mapName]?.initial_pose;
+    return isRecord(pose) && typeof pose.site === "string" ? pose : null;
+  }
+
+  /**
+   * Make a point of the edited map the start position, or clear it with null.
+   * A map has one: the point it was on before stops being it. `on_start` is
+   * kept when the start position moves. Returns the point it moved from.
+   */
+  setInitialPose(name: string | null): string | null {
+    const map = this.#sites.maps[this.#mapName];
+    if (!map) return null;
+    const before = this.initialPose;
+    if (name !== null && !this.points[name]) return null;
+    if ((before?.site ?? null) === name) return null;
+    this.edit(name === null ? "Clear the start position" : `Make ${name} the start position`, () => {
+      if (name === null) {
+        delete map.initial_pose;
+        return;
+      }
+      const next: InitialPose = { site: name };
+      if (before?.on_start === false) next.on_start = false;
+      map.initial_pose = next;
+    });
+    return before && before.site !== name ? before.site : null;
+  }
+
+  /** Whether mission_runner sets the start position when it starts (absent = true). */
+  setInitialPoseOnStart(onStart: boolean): void {
+    const map = this.#sites.maps[this.#mapName];
+    const pose = map?.initial_pose;
+    if (!pose) return;
+    this.edit(onStart ? "Set the start position when the robot starts" : "Do not set the start position when the robot starts", () => {
+      if (onStart) delete pose.on_start;
+      else pose.on_start = false;
+    });
+  }
+
   /** Set or clear (empty or undefined) a point's request or answer topic. */
   setPointTopics(name: string, patch: { request_topic?: string | undefined; answer_topic?: string | undefined }, label = "Change the point's topics"): void {
     const site = this.points[name];
@@ -472,6 +512,7 @@ export class RouteStore {
         if (lane.from === from) lane.from = trimmed;
         if (lane.to === from) lane.to = trimmed;
       }
+      if (map?.initial_pose?.site === from) map.initial_pose.site = trimmed;
       for (const mission of this.#missions) renameInMission(mission, from, trimmed);
     });
     if (this.#selection.kind === "point" && this.#selection.name === from) this.select({ kind: "point", name: trimmed });
@@ -500,6 +541,7 @@ export class RouteStore {
       delete this.points[name];
       const map = this.#sites.maps[this.#mapName];
       if (map?.edges) map.edges = map.edges.filter((e) => e.from !== name && e.to !== name);
+      if (map?.initial_pose?.site === name) delete map.initial_pose;
     });
     this.#clampSelection();
     this.#emit("selection");

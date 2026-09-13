@@ -526,6 +526,33 @@ export function validateSiteTopics(sites: SitesDoc | null | undefined): Finding[
   return out;
 }
 
+/**
+ * Each map's start position (`initial_pose`): a point of that same map, and
+ * `on_start` a boolean when present. Paths are `["maps", map, "initial_pose", key]`.
+ */
+export function validateInitialPoses(sites: SitesDoc | null | undefined): Finding[] {
+  const out: Finding[] = [];
+  if (!sites || !isRecord(sites.maps)) return out;
+  for (const [mapName, map] of Object.entries(sites.maps)) {
+    if (!isRecord(map) || map.initial_pose === undefined) continue;
+    const pose: unknown = map.initial_pose;
+    const base: Path = ["maps", mapName, "initial_pose"];
+    if (!isRecord(pose)) {
+      out.push({ level: "error", path: base, message: `the start position of map ${mapName} must be an object with a site` });
+      continue;
+    }
+    if (typeof pose.site !== "string" || pose.site === "") {
+      out.push({ level: "error", path: [...base, "site"], message: `the start position of map ${mapName} names no point` });
+    } else if (!isRecord(map.sites) || !(pose.site in map.sites)) {
+      out.push({ level: "error", path: [...base, "site"], message: `the start position of map ${mapName} is ${pose.site}, which is not a point of that map` });
+    }
+    if (pose.on_start !== undefined && typeof pose.on_start !== "boolean") {
+      out.push({ level: "error", path: [...base, "on_start"], message: `"Set it when the robot starts" of map ${mapName} must be true or false` });
+    }
+  }
+  return out;
+}
+
 /** Findings grouped by step id (for badges). Findings without a step id go under "". */
 export function findingsByStep(result: ValidationResult): Map<string, Finding[]> {
   const m = new Map<string, Finding[]>();

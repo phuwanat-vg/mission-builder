@@ -65,6 +65,20 @@ export class MapsPanel {
       card.append(
         h("div", { class: "map-detail", text: `${pointCount} ${pointCount === 1 ? "point" : "points"} · ${laneCount} ${laneCount === 1 ? "lane" : "lanes"}` }),
       );
+      const start = map.initial_pose;
+      if (start && typeof start.site === "string") {
+        const known = !!map.sites?.[start.site];
+        card.append(
+          h("div", {
+            class: `map-detail map-start${known ? "" : " bad"}`,
+            text: known
+              ? `Starts at ${start.site}${start.on_start === false ? " (not set on start)" : ", set when the robot starts"}`
+              : `Starts at ${start.site}, which is not a point of this map`,
+          }),
+        );
+      } else {
+        card.append(h("div", { class: "map-detail map-start", text: "No start position" }));
+      }
       card.append(h("div", { class: "map-file", text: map.file ?? "No map file: the runner draws a plain room around the points instead." }));
 
       const buttons = h("div", { class: "row buttons" });

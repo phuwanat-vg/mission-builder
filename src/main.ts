@@ -11,7 +11,7 @@ if (import.meta.env.DEV) (window as unknown as { app: App }).app = app;
 // dialog can be driven without a robot. The whole branch, and the module it
 // loads, is dropped from production builds.
 if (import.meta.env.DEV && new URLSearchParams(location.search).has("fake-robot")) {
-  void import("./dev/fakeAutostart").then((m) => m.installFakeAutostart(app.api, new URLSearchParams(location.search)));
+  void import("./dev/fakeAutostart").then((m) => m.installFakeAutostart(app.api, new URLSearchParams(location.search), () => app.store.sites));
 }
 
 // During `vite dev`, tear down the old instance (WebSocket, render loop, timers)

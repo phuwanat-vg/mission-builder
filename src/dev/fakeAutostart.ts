@@ -10,9 +10,16 @@
  *   &fake-unsupported=1           supported: false (like the runner on Windows)
  *   &fake-old=1                   a runner without /api/autostart (404)
  *   &fake-services=1              start with a robot and a mission service
+ *
+ * It also answers `POST /api/robot/initial_pose` (Set robot pose here now):
+ *   &fake-initial-pose=fail       localization does not confirm (504)
+ *   &fake-initial-pose=busy       a mission is running (409)
+ *   &fake-initial-pose=old        a runner without the endpoint (404)
+ *   &fake-start-event=1           send start-up robot.initial_pose events after 1.5 s
  */
 
 import type { AutostartOverride, AutostartService, AutostartSpec, MissionApi, RunnerEvent } from "../mission/MissionApi";
+import type { SitesDoc } from "../mission/types";
 
 const USER = "pi";
 const HOME = `/home/${USER}`;
@@ -70,8 +77,21 @@ function stamp(): string {
   return new Date().toISOString().replace(/\.\d+Z$/, "+0000");
 }
 
-export function installFakeAutostart(api: MissionApi, params: URLSearchParams): void {
+export function installFakeAutostart(api: MissionApi, params: URLSearchParams, getSites?: () => SitesDoc): void {
   const flag = (k: string): boolean => params.get(k) === "1";
+  // On startup the fake runner sets the start position of the default map, as mission_runner does.
+  if (params.get("fake-start-event") === "1") {
+    setTimeout(() => {
+      const sites = getSites?.();
+      const map = sites ? sites.maps[sites.default_map ?? ""] : undefined;
+      const site = map?.initial_pose?.site;
+      const s = site ? map?.sites?.[site] : undefined;
+      if (!site || !s) return;
+      const emit = (ev: RunnerEvent): void => api.emitLocal(ev);
+      emit({ type: "robot.initial_pose", site, x: s.x, y: s.y, yaw_deg: s.yaw_deg ?? 0, source: "start", ok: true, message: "robot already localized, skipped" });
+      emit({ type: "robot.initial_pose", site, x: s.x, y: s.y, yaw_deg: s.yaw_deg ?? 0, source: "start", ok: false, message: "AMCL is not active" });
+    }, 1500);
+  }
   if (flag("fake-old")) {
     const old: AutostartOverride = async () => ({ status: 404, body: { error: "not found" } });
     api.setAutostartOverride(old);
@@ -218,6 +238,7 @@ export function installFakeAutostart(api: MissionApi, params: URLSearchParams): 
     await new Promise((r) => setTimeout(r, 120));
     const url = new URL(rawPath, "http://robot");
     const path = url.pathname;
+    if (path === "/api/robot/initial_pose") return initialPose(method, body, emit);
     const change = method !== "GET";
     if (change && !supported && path !== "/api/autostart/browse") return { status: 409, body: { error: "systemd user services are not available on this robot" } };
 
@@ -295,6 +316,40 @@ export function installFakeAutostart(api: MissionApi, params: URLSearchParams): 
     }
     return { status: 405, body: { error: `${method} is not allowed on ${path}` } };
   };
+
+  /**
+   * `POST /api/robot/initial_pose`. `&fake-initial-pose=` fail (504), busy
+   * (409) or old (404) picks the failure; otherwise it confirms after a moment.
+   */
+  async function initialPose(method: string, body: unknown, emit: (ev: RunnerEvent) => void): Promise<{ status: number; body: unknown }> {
+    const mode = params.get("fake-initial-pose") ?? "";
+    if (mode === "old") return { status: 404, body: { error: "not found" } };
+    if (method !== "POST") return { status: 405, body: { error: `${method} is not allowed` } };
+    if (mode === "busy") return { status: 409, body: { error: "a mission is running; stop it before setting the pose" } };
+    const b = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
+    const sites = getSites?.();
+    const map = sites ? sites.maps[sites.default_map ?? Object.keys(sites.maps)[0] ?? ""] : undefined;
+    let x: number, y: number, yaw: number;
+    const site = typeof b.site === "string" ? b.site : undefined;
+    if (site !== undefined) {
+      const s = map?.sites?.[site];
+      if (!s) return { status: 400, body: { error: `unknown site '${site}'`, errors: [`site '${site}' is not in the active map`] } };
+      [x, y, yaw] = [s.x, s.y, s.yaw_deg ?? 0];
+    } else if (typeof b.x === "number" && typeof b.y === "number") {
+      [x, y, yaw] = [b.x, b.y, typeof b.yaw_deg === "number" ? b.yaw_deg : 0];
+    } else {
+      return { status: 400, body: { error: "give a site or x, y and yaw_deg" } };
+    }
+    await new Promise((r) => setTimeout(r, 700));
+    const event = { type: "robot.initial_pose", ...(site ? { site } : {}), x, y, yaw_deg: yaw, source: "api" };
+    if (mode === "fail") {
+      const error = "localization did not confirm the pose within 10 s";
+      emit({ ...event, ok: false, message: error });
+      return { status: 504, body: { error } };
+    }
+    emit({ ...event, ok: true });
+    return { status: 200, body: { ok: true, ...(site ? { site } : {}), x, y, yaw_deg: yaw } };
+  }
 
   if (flag("fake-services")) {
     const noop = (): void => undefined;
